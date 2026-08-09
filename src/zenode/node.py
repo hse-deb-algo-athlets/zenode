@@ -324,7 +324,7 @@ class Node:
         self._log_handler = None
 
     def _wire_bindings(self) -> None:
-        """Activate ``@subscribe``/``@serve``/``@every``/``@on_silence`` declarations.
+        """Activate ``@subscribe``/``@serve``/``@every``/``@on_silence``/``@on_matching``.
 
         Runs after ``on_start`` so handlers never observe a half-initialized
         node.
@@ -342,7 +342,7 @@ class Node:
                     f"{type(self).__name__}.{attr} carries a zenode binding but is not callable"
                 )
             for binding in bindings:
-                if binding.kind in ("on_silence", "on_resume"):
+                if binding.kind in ("on_silence", "on_resume", "on_matching"):
                     hooks.append((attr, binding, handler))
                 elif binding.kind == "subscribe" and isinstance(binding.target, Topic):
                     self.subscribe(binding.target, handler, **binding.opts)
@@ -364,7 +364,10 @@ class Node:
                     raise ContractError(f"invalid binding on {type(self).__name__}.{attr}")
 
         for attr, binding, handler in hooks:
-            self._attach_silence_hook(attr, binding, handler)
+            if binding.kind == "on_matching":
+                self._attach_matching_hook(attr, binding, handler)
+            else:
+                self._attach_silence_hook(attr, binding, handler)
 
     def _attach_silence_hook(self, attr: str, binding: Binding, handler: Handler) -> None:
         """Point one ``@on_silence``/``@on_resume`` body at its subscriptions.
@@ -392,6 +395,25 @@ class Node:
                 sub._add_silence_hook(handler)
             else:
                 sub._add_resume_hook(handler)
+
+    def _attach_matching_hook(self, attr: str, binding: Binding, handler: Handler) -> None:
+        """Point one ``@on_matching`` body at the publisher(s) it gates.
+
+        Matched by *resolved key*, like the silence hooks, so an alias or a
+        publisher created imperatively in ``on_start`` binds just the same.
+        A hook with nothing to gate is an error rather than a no-op: the whole
+        point is not producing data, and a binding that never fires would leave
+        the camera running while looking wired up.
+        """
+        where = f"@on_matching on {type(self).__name__}.{attr}"
+        if not isinstance(binding.target, Topic):  # pragma: no cover - decorators enforce this
+            raise ContractError(f"{where}: target must be a Topic")
+        key = binding.target.resolve(self.namespace)
+        matches = [pub for pub in self._publishers if pub.key == key]
+        if not matches:
+            raise ContractError(f"{where}: nothing on this node publishes {key!r}")
+        for pub in matches:
+            pub.on_matching(handler)
 
     async def shutdown(self) -> None:
         if self._state in ("stopping", "stopped"):
@@ -483,7 +505,9 @@ class Node:
                 "so it publishes through the normal path",
                 extra={"key": key},
             )
-        pub = Publisher(inner, topic=topic, key=key, node_name=self.name, pool=self._shm)
+        pub = Publisher(
+            inner, topic=topic, key=key, node_name=self.name, pool=self._shm, log=self.log
+        )
         self._publishers.append(pub)
         return pub
 
@@ -662,7 +686,8 @@ class Node:
                 stale=sum(s.stale for s in self._subscriptions),
                 handler_errors=sum(s.errors for s in self._subscriptions)
                 + sum(srv.errors for srv in self._servers)
-                + sum(t.errors for t in self._timers),
+                + sum(t.errors for t in self._timers)
+                + sum(p.errors for p in self._publishers),
                 timer_overruns=sum(t.overruns for t in self._timers),
                 deadline_misses=sum(s.deadline_misses for s in self._subscriptions),
                 logs_dropped=self._log_handler.dropped if self._log_handler else 0,

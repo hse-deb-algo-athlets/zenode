@@ -15,6 +15,7 @@ from zenode import (
     Service,
     Topic,
     every,
+    on_matching,
     on_resume,
     on_silence,
     publish,
@@ -424,3 +425,89 @@ async def test_on_silence_for_an_unsubscribed_topic_fails_at_start():
         node = Orphan(session=h.session, transport=local_transport())
         with pytest.raises(ContractError, match="nothing on this node subscribes"):
             await node.start()
+
+
+@pytest.mark.integration
+async def test_on_matching_gates_a_declared_publisher():
+    """The camera case: told where it starts, then told about every change."""
+
+    class Camera(Node):
+        name = "camera"
+        health_interval = None
+
+        frames = publish(OUT)
+
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.streaming: list[bool] = []
+
+        @on_matching(OUT)
+        async def on_viewers(self, matching: bool) -> None:
+            self.streaming.append(matching)
+
+    async with harness() as h:
+        node = await h.start_node(Camera)
+        for _ in range(50):
+            if node.streaming:
+                break
+            await asyncio.sleep(0.02)
+        assert node.streaming == [False]
+
+        sub = h.subscribe(OUT, lambda msg: None)
+        for _ in range(50):
+            if node.streaming[-1]:
+                break
+            await asyncio.sleep(0.02)
+        assert node.streaming == [False, True]
+
+        await sub.stop()
+        for _ in range(50):
+            if not node.streaming[-1]:
+                break
+            await asyncio.sleep(0.02)
+        assert node.streaming == [False, True, False]
+
+
+@pytest.mark.integration
+async def test_on_matching_for_an_unpublished_topic_fails_at_start():
+    """A gate over a topic this node never publishes can only be a typo."""
+
+    class Orphan(Node):
+        name = "orphan-matching"
+        health_interval = None
+
+        @on_matching(OUT)
+        async def viewers(self, matching: bool) -> None: ...
+
+    async with harness() as h:
+        node = Orphan(session=h.session, transport=local_transport())
+        with pytest.raises(ContractError, match="nothing on this node publishes"):
+            await node.start()
+
+
+@pytest.mark.integration
+async def test_on_matching_binds_an_imperative_publisher():
+    """Matched by resolved key, so the ``on_start`` escape hatch works too."""
+
+    class Manual(Node):
+        name = "manual-matching"
+        health_interval = None
+
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.streaming: list[bool] = []
+
+        async def on_start(self) -> None:
+            self.publisher(OUT)
+
+        @on_matching(OUT)
+        def viewers(self, matching: bool) -> None:
+            self.streaming.append(matching)
+
+    async with harness() as h:
+        node = await h.start_node(Manual)
+        for _ in range(50):
+            if node.streaming:
+                break
+            await asyncio.sleep(0.02)
+        assert node.streaming == [False]

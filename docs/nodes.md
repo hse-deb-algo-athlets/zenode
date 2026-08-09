@@ -57,6 +57,7 @@ metadata, so decorated handlers remain directly callable in tests.
 | `@every(interval, …)` | Periodic body. |
 | `@on_silence(topic)` | Reaction when a subscription goes quiet. |
 | `@on_resume(topic)` | Reaction when it recovers. |
+| `@on_matching(topic)` | Reaction when a published topic gains its first subscriber or loses its last. |
 
 `publish()` descriptors materialise **before** `on_start`, so `on_start` may
 use them. Decorated bindings activate **after** it, so handlers never observe a
@@ -279,6 +280,51 @@ if self.frames.matching:
 
 Latched publishers always report `True`, since their cache must stay warm for
 late joiners.
+
+### Producing only while someone is listening
+
+Polling `matching` skips the encode but still runs the sensor. For producers
+that are expensive to *run* — a camera, a lidar — take the edge instead:
+
+```python
+class CameraNode(Node):
+    frames = publish(Topics.frames)
+
+    @on_matching(Topics.frames)
+    async def on_viewers(self, matching: bool) -> None:
+        await (self.camera.start() if matching else self.camera.stop())
+        self.streaming = matching
+
+    @every(0.033)
+    async def grab(self) -> None:
+        if self.streaming:
+            self.frames.put(self.camera.encode_jpeg())
+```
+
+The hook fires **once with the current state** when the node starts, then only
+on a change — so it alone decides, with nothing left to poll. zenoh reports
+changes, not levels: a publisher declared with nobody listening would otherwise
+never hear anything and the node would have to guess where it started.
+
+Rising and falling edges are first-and-last, not per subscriber: a second
+viewer joining is not another rising edge, so a hook that starts hardware is
+never told to start it twice.
+
+Same shape imperatively, for a publisher created in `on_start`:
+
+```python
+self.publisher(Topics.frames).on_matching(self._on_viewers)
+```
+
+Two constraints, both errors at `start()` rather than silent no-ops: the node
+must publish the topic, and the topic must not be latched — a latched publisher
+always matches, so the falling edge would never arrive and the camera would run
+forever while the gate looked wired up. A hook that raises is logged and counted
+into `handler_errors` on the heartbeat; the node keeps running.
+
+Matching is a view of the routing graph, not a delivery receipt. It is the right
+signal for "don't bother producing this" and the wrong one for "the data
+definitely arrived" — and it says nothing about *who* is listening.
 
 ## Entry point
 

@@ -80,6 +80,9 @@ producer comes up a moment later will trip once and exit. Pair it with
 SilenceHook = Callable[[float], Any]
 """``(silent_for) -> None | Awaitable`` — an ``@on_silence``/``@on_resume`` body."""
 
+MatchingHook = Callable[[bool], Any]
+"""``(matching) -> None | Awaitable`` — an ``@on_matching`` body."""
+
 
 def _handler_arity(handler: Handler) -> int:
     try:
@@ -103,14 +106,23 @@ class Publisher(Generic[T]):
         key: str,
         node_name: str,
         pool: ShmPool | None = None,
+        log: logging.Logger = logger,
     ) -> None:
         self._inner = inner
         self.topic = topic
         self.key = key
         self._node_name = node_name
         self._pool = pool if topic.shm else None
+        self._log = log
         self._seq = itertools.count(1)
         self.sent = 0
+        self.errors = 0
+
+        self._matching_hooks: list[MatchingHook] = []
+        self._matching_state = False
+        self._matching_listener: Any = None
+        self._matching_loop: asyncio.AbstractEventLoop | None = None
+        self._matching_tasks: set[asyncio.Task[None]] = set()
 
     def put(self, value: T) -> None:
         seq = next(self._seq)
@@ -148,7 +160,9 @@ class Publisher(Generic[T]):
 
         Use to skip producing expensive payloads (e.g. JPEG encoding) when
         nobody is listening. Latched publishers report ``True`` (their cache
-        must stay warm for late joiners anyway).
+        must stay warm for late joiners anyway). For work that has to be
+        started and stopped rather than skipped, take the edge instead:
+        :meth:`on_matching`.
         """
         inner = self._inner
         if isinstance(inner, zenoh.Publisher):
@@ -164,11 +178,95 @@ class Publisher(Generic[T]):
                 return True
         return True
 
+    # -- matching edges ------------------------------------------------------
+
+    def on_matching(self, hook: MatchingHook) -> None:
+        """Call ``hook(matching)`` when the first subscriber arrives or the last leaves.
+
+        The edge form of :attr:`matching`, for work that is too expensive to
+        gate per message — a camera that should not run at all while nobody is
+        watching. Polling can only skip the encode; an edge can stop the sensor.
+
+        The hook fires **once with the current state** at registration, so a
+        node never has to poll to learn where it starts, and thereafter only on
+        a change. Registration must happen on the node's event loop (in
+        ``on_start`` or later); the hook itself runs there too, sync or async.
+
+        Not available on a latched topic: an advanced publisher keeps its cache
+        warm for late joiners, so it always matches and the falling edge would
+        never come. Raising beats a gate that silently never closes.
+        """
+        if not isinstance(self._inner, zenoh.Publisher):
+            raise ContractError(
+                f"publisher {self.key!r}: on_matching needs a plain publisher, but this topic is "
+                "latched — its cache must stay warm for late joiners, so it always matches"
+            )
+        self._matching_hooks.append(hook)
+        if self._matching_listener is None:
+            self._matching_loop = asyncio.get_running_loop()
+            # Listener first, status second: a subscriber that appears between
+            # the two is then an event we can dedupe against the seed, rather
+            # than an edge that fell into the gap and was seen by neither.
+            self._matching_listener = self._inner.declare_matching_listener(self._matching_event)
+            self._matching_state = self.matching
+        self._fire_matching((hook,), self._matching_state)
+
+    def _matching_event(self, status: Any) -> None:
+        """zenoh worker thread: unwrap and hand the edge to the loop, nothing else."""
+        matching = bool(getattr(status, "matching", status))
+        loop = self._matching_loop
+        if loop is None:  # pragma: no cover - set before the listener exists
+            return
+        with contextlib.suppress(RuntimeError):  # loop already closed (shutdown race)
+            loop.call_soon_threadsafe(self._matching_changed, matching)
+
+    def _matching_changed(self, matching: bool) -> None:
+        # Deduped against the seed: zenoh replays the current status when a
+        # listener is declared while a subscriber is already there, and a hook
+        # that starts hardware must not be told twice to start it.
+        if matching == self._matching_state:
+            return
+        self._matching_state = matching
+        self._fire_matching(tuple(self._matching_hooks), matching)
+
+    def _fire_matching(self, hooks: Sequence[MatchingHook], matching: bool) -> None:
+        loop = self._matching_loop
+        if loop is None or not hooks:  # pragma: no cover - on_matching sets both
+            return
+        task = loop.create_task(self._run_matching_hooks(hooks, matching))
+        self._matching_tasks.add(task)
+        task.add_done_callback(self._matching_tasks.discard)
+
+    async def _run_matching_hooks(self, hooks: Sequence[MatchingHook], matching: bool) -> None:
+        for hook in hooks:
+            try:
+                result = hook(matching)
+                if inspect.isawaitable(result):
+                    await result
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.errors += 1
+                self._log.exception("matching handler raised", extra={"key": self.key})
+
     def undeclare(self) -> None:
+        # Listener first, so no further edge is queued onto a loop that is
+        # tearing down; the hooks it would call are about to be cancelled.
+        if self._matching_listener is not None:
+            try:
+                self._matching_listener.undeclare()
+            except Exception as e:
+                self._log.debug(
+                    "undeclare matching listener failed: %s", e, extra={"key": self.key}
+                )
+            self._matching_listener = None
+        for task in list(self._matching_tasks):
+            task.cancel()
+        self._matching_tasks.clear()
         try:
             self._inner.undeclare()
         except Exception as e:
-            logger.debug("undeclare publisher failed: %s", e, extra={"key": self.key})
+            self._log.debug("undeclare publisher failed: %s", e, extra={"key": self.key})
 
 
 class Subscription(Generic[T]):

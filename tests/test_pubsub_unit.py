@@ -691,3 +691,88 @@ async def test_matching_reports_whether_anyone_is_listening():
                 break
             await asyncio.sleep(0.02)
         assert pub.matching is True
+
+
+def test_on_matching_refuses_non_plain_publishers():
+    """Latched means always matching, so the falling edge would never arrive.
+
+    A gate whose closing edge cannot happen is worse than no gate: it looks
+    wired up while the camera runs forever.
+    """
+    pub, _inner = make_publisher()
+    with pytest.raises(ContractError, match="latched"):
+        pub.on_matching(lambda matching: None)
+
+
+async def _wait_for(predicate: Any, what: str, timeout: float = 3.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"timed out waiting for {what}")
+
+
+@pytest.mark.integration
+async def test_on_matching_reports_the_current_state_then_each_edge():
+    """The seed matters as much as the edges.
+
+    zenoh only reports a *change*, so a publisher declared with nobody
+    listening never hears anything — a hook that only saw edges would leave the
+    node guessing where it started.
+    """
+    from zenode.testing import harness
+
+    watched = Topic("unit/watched", Ping)
+    seen: list[bool] = []
+    async with harness() as h:
+        pub = h.publisher(watched)
+        pub.on_matching(seen.append)
+        await _wait_for(lambda: seen == [False], "the initial state")
+
+        sub = h.subscribe(watched, lambda msg: None)
+        await _wait_for(lambda: seen == [False, True], "the rising edge")
+
+        await sub.stop()
+        await _wait_for(lambda: seen == [False, True, False], "the falling edge")
+
+
+@pytest.mark.integration
+async def test_a_second_matching_hook_learns_the_state_it_missed():
+    """Registered late — after ``on_start`` opened hardware — it still gets told."""
+    from zenode.testing import harness
+
+    watched = Topic("unit/watched_late", Ping)
+    async with harness() as h:
+        pub = h.publisher(watched)
+        first: list[bool] = []
+        pub.on_matching(first.append)
+        h.subscribe(watched, lambda msg: None)
+        await _wait_for(lambda: first == [False, True], "the first hook to see a subscriber")
+
+        late: list[bool] = []
+        pub.on_matching(late.append)
+        await _wait_for(lambda: late == [True], "the late hook to be seeded")
+
+        # A second subscriber is not a second edge: the hook gates work that is
+        # already running, and re-firing would restart it.
+        h.subscribe(watched, lambda msg: None)
+        await asyncio.sleep(0.2)
+        assert late == [True]
+
+
+@pytest.mark.integration
+async def test_a_raising_matching_hook_is_counted_not_fatal():
+    from zenode.testing import harness
+
+    watched = Topic("unit/watched_raises", Ping)
+
+    def boom(matching: bool) -> None:
+        raise RuntimeError("camera is on fire")
+
+    async with harness() as h:
+        pub = h.publisher(watched)
+        pub.on_matching(boom)
+        await _wait_for(lambda: pub.errors == 1, "the raising hook to be counted")
+        h.subscribe(watched, lambda msg: None)
+        await _wait_for(lambda: pub.errors == 2, "the rising edge to reach it anyway")

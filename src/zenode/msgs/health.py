@@ -44,8 +44,9 @@ class NodeHealth(BaseModel):
     dropped: int = 0
     stale: int = 0
     handler_errors: int = 0
-    """Exceptions raised inside subscription handlers, service handlers and
-    timer bodies — all the places zenode catches and keeps going."""
+    """Exceptions raised inside subscription handlers, service handlers, timer
+    bodies and ``@on_matching`` hooks — all the places zenode catches and keeps
+    going."""
     timer_overruns: int = 0
     """Timer periods missed because a body ran longer than its interval.
     Sustained overruns mean a periodic loop cannot hold its rate."""

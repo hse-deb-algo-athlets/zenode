@@ -25,7 +25,16 @@ from .config import (
     load_section,
     load_transport_config,
 )
-from .declarative import Binding, every, on_resume, on_silence, publish, serve, subscribe
+from .declarative import (
+    Binding,
+    every,
+    on_matching,
+    on_resume,
+    on_silence,
+    publish,
+    serve,
+    subscribe,
+)
 from .envelope import Envelope
 from .errors import (
     ConfigError,
@@ -90,6 +99,7 @@ __all__ = [
     "load_node_config",
     "load_section",
     "load_transport_config",
+    "on_matching",
     "on_resume",
     "on_silence",
     "otel",

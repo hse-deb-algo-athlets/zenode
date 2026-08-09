@@ -56,7 +56,7 @@ BINDINGS_ATTR = "__zenode_bindings__"
 class Binding:
     """One declarative wiring instruction stamped onto a method."""
 
-    kind: Literal["subscribe", "serve", "every", "on_silence", "on_resume"]
+    kind: Literal["subscribe", "serve", "every", "on_silence", "on_resume", "on_matching"]
     target: Topic[Any] | Service[Any, Any] | None = None
     interval: IntervalSpec | None = None
     opts: dict[str, Any] = field(default_factory=dict)
@@ -146,6 +146,36 @@ def on_resume(topic: Topic[Any]) -> Callable[[F], F]:
 
     def deco(fn: F) -> F:
         return _stamp(fn, Binding(kind="on_resume", target=topic))
+
+    return deco
+
+
+def on_matching(topic: Topic[Any]) -> Callable[[F], F]:
+    """React when ``topic`` gains its first subscriber or loses its last.
+
+    Signature ``(self, matching: bool)``, sync or async. The counterpart to
+    ``Publisher.matching`` for producers that are expensive to *run*, not just
+    to encode — a camera, a lidar spin-up::
+
+        frames = publish(Topics.frames)
+
+        @on_matching(Topics.frames)
+        async def on_viewers(self, matching: bool) -> None:
+            await (self.camera.start() if matching else self.camera.stop())
+
+    Fires once with the current state when the node starts, then only on a
+    change, so the hook alone is enough to decide — there is nothing to poll.
+    The node must publish that topic (decoratively or from ``on_start``), and
+    the topic must not be latched: a latched publisher always matches, so the
+    falling edge would never arrive. Both are errors at ``start()``.
+
+    Matching is a view of the routing graph, not a delivery receipt — good for
+    "don't bother producing this", wrong for "the data definitely arrived".
+    Stackable, so one method can cover several topics.
+    """
+
+    def deco(fn: F) -> F:
+        return _stamp(fn, Binding(kind="on_matching", target=topic))
 
     return deco
 
