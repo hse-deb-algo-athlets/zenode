@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 from zenode import Node, NodeConfig, Service, Topic, run
 from zenode.declarative import BINDINGS_ATTR, Binding
-from zenode.errors import ConfigError, ContractError
+from zenode.errors import ConfigError, ContractError, StartTimeout
 from zenode.testing import harness, local_transport
 
 
@@ -82,6 +82,28 @@ def test_namespace_defaults_to_the_transport_namespace():
 def test_explicit_namespace_wins_over_the_transport():
     node = Quiet(transport=local_transport("robodog"), namespace="other")
     assert node.namespace == "other"
+
+
+@pytest.mark.parametrize("budget", [0, -1.0])
+def test_a_nonpositive_start_timeout_is_refused(budget):
+    class Impatient(Node):
+        name = "impatient"
+        start_timeout = budget
+
+    with pytest.raises(ContractError, match="start_timeout"):
+        Impatient()
+
+
+@pytest.mark.parametrize("budget", [0, -1.0])
+def test_a_nonpositive_shutdown_timeout_is_refused(budget):
+    """Unlike ``start_timeout``, this one has no "wait forever" setting."""
+
+    class Lingering(Node):
+        name = "lingering"
+        shutdown_timeout = budget
+
+    with pytest.raises(ContractError, match="shutdown_timeout"):
+        Lingering()
 
 
 @pytest.mark.parametrize(
@@ -300,6 +322,145 @@ async def test_a_broken_on_stop_does_not_mask_the_startup_error(caplog: pytest.L
             await node.start()
 
     assert any("on_stop raised" in r.message for r in caplog.records)
+
+
+# ------------------------------------------------------------- start_timeout
+
+
+class Wedged(Node):
+    """Hardware that never answers — the case ``start_timeout`` exists for."""
+
+    name = "wedged"
+    health_interval = None
+    start_timeout = 0.2
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.released = False
+
+    async def on_start(self) -> None:
+        await asyncio.sleep(30)
+
+    async def on_stop(self) -> None:
+        self.released = True
+
+
+@pytest.mark.integration
+async def test_an_on_start_that_overruns_its_timeout_tears_the_node_down():
+    """Otherwise the node sits in ``starting`` forever and no supervisor notices."""
+    async with harness() as h:
+        node = Wedged(session=h.session, transport=local_transport())
+        with pytest.raises(StartTimeout, match=r"wedged.*start_timeout=0\.2s"):
+            await node.start()
+
+    assert node.released, "the failure path must still run on_stop"
+    assert node.state == "stopped"
+    assert node._publishers == []
+    assert node._token is None
+
+
+@pytest.mark.integration
+async def test_on_starts_own_timeout_error_is_not_relabelled():
+    """``asyncio``'s timeout *is* ``TimeoutError``, and so is "the axis did not answer"."""
+    async with harness() as h:
+        node = HalfOpen(session=h.session, transport=local_transport())
+        with pytest.raises(TimeoutError, match="axis 1") as raised:
+            await node.start()
+
+    assert not isinstance(raised.value, StartTimeout)
+
+
+@pytest.mark.integration
+async def test_start_timeout_none_waits():
+    class Patient(Wedged):
+        name = "patient"
+        start_timeout = None
+
+        async def on_start(self) -> None:
+            await asyncio.sleep(0.3)  # longer than Wedged's budget, but none applies
+
+    async with harness() as h:
+        node = await h.start_node(Patient)
+        assert node.state == "running"
+
+
+# ------------------------------------------------------------------ single-use
+
+
+@pytest.mark.integration
+async def test_a_stopped_node_refuses_to_start_again():
+    """The stop request is latched, so a silent second start would exit at once."""
+    async with harness() as h:
+        node = await h.start_node(Quiet)
+        await node.shutdown()
+        with pytest.raises(RuntimeError, match="single-use"):
+            await node.start()
+
+
+@pytest.mark.integration
+async def test_starting_a_running_node_again_is_refused():
+    """Without the guard this declares a second token, publishers and health timer."""
+    async with harness() as h:
+        node = await h.start_node(Quiet)
+        with pytest.raises(RuntimeError, match="already running"):
+            await node.start()
+
+
+@pytest.mark.integration
+async def test_a_failed_start_may_be_retried():
+    """A start that failed left nothing declared, so transient hardware gets another go."""
+    attempts: list[int] = []
+
+    class Flaky(Node):
+        name = "flaky"
+        health_interval = None
+
+        async def on_start(self) -> None:
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError("usb not ready")
+
+    async with harness() as h:
+        node = Flaky(session=h.session, transport=local_transport())
+        with pytest.raises(RuntimeError, match="usb not ready"):
+            await node.start()
+        await node.start()
+        assert node.state == "running"
+        await node.shutdown()
+
+
+# --------------------------------------------------------------- teardown bound
+
+
+@pytest.mark.integration
+async def test_teardown_does_not_wait_forever_for_a_stuck_task(caplog: pytest.LogCaptureFixture):
+    """A task in ``blocking()`` ignores cancellation; shutdown must not hang on it."""
+
+    class Sticky(Node):
+        name = "sticky"
+        health_interval = None
+        shutdown_timeout = 0.2
+
+    release = asyncio.Event()
+
+    async def stubborn() -> None:
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            await release.wait()  # stands in for an executor thread mid-call
+
+    async with harness() as h:
+        node = await h.start_node(Sticky)
+        node.spawn(stubborn(), name="stuck")
+        await asyncio.sleep(0)  # let it reach the sleep
+        with caplog.at_level(logging.WARNING, logger="zenode.node.sticky"):
+            await asyncio.wait_for(node.shutdown(), timeout=2.0)
+        release.set()
+        await asyncio.sleep(0.05)  # let the task retire before the loop goes away
+
+    warnings = [r for r in caplog.records if "still running after shutdown_timeout" in r.message]
+    assert warnings, "an overstaying task must be reported, not waited on in silence"
+    assert "sticky:stuck" in warnings[0].getMessage()
 
 
 @pytest.mark.integration

@@ -54,8 +54,18 @@ namespace is prefixed at runtime by `resolve_key`. `Topic.absolute()` opts out.
 `Node.start()` has a load-bearing order: session → duplicate-name check → liveliness token →
 `publish()` descriptors materialized → log publishing → health timer → `on_start()` →
 `_wire_bindings()` → trace service. Publishers exist *before* `on_start` so it can use them;
-decorated bindings activate *after* it so a handler never sees a half-built node. Any failure in
-that block runs `on_stop()` and tears down, because `on_start` is where hardware is acquired.
+decorated bindings activate *after* it so a handler never sees a half-built node. The health
+timer is the one deliberate exception, spawned before `on_start` so `state="starting"` is
+observable while a node is still coming up. Any failure in that block runs `on_stop()` and tears
+down, because `on_start` is where hardware is acquired.
+
+`on_start` runs under `start_timeout` via `asyncio.timeout` — **not** `wait_for` — because since
+3.11 asyncio's timeout *is* the builtin `TimeoutError`, which is also what a driver raises when
+an axis does not answer; only `expired()` tells the two apart. Neither helps against a
+*synchronous* blocking call, which stalls the loop and the signal handlers with it; `Node.blocking`
+is the answer and the docs say so. Nodes are single-use: `_stop_event` is latched, so `start()`
+refuses a node that has already run rather than coming up and exiting silently. Teardown bounds
+its task join by `shutdown_timeout` because cancellation cannot reach a thread inside `blocking()`.
 
 `declarative.py` decorators only stamp `__zenode_bindings__` metadata and return the function
 unchanged — handlers stay directly callable in tests. `collect_bindings`/`collect_publishers`

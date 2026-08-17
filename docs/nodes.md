@@ -37,6 +37,8 @@ run(Nav)
 |---|---|---|
 | `name` | — | Required. Identifies the node on the network and in logs. |
 | `health_interval` | `2.0` | Seconds between health heartbeats. `None` disables. |
+| `start_timeout` | `30.0` | Seconds `on_start` may take before the node tears down and raises `StartTimeout`. `None` waits indefinitely. |
+| `shutdown_timeout` | `5.0` | Seconds teardown waits for cancelled background tasks. Overstayers are named in a warning. |
 | `allow_duplicates` | `True` | When `False`, a second node of this name raises `DuplicateNodeError`. |
 | `publish_logs_at` | `"WARNING"` | Minimum level published to the log topic. `None` disables. |
 | `trace_ring` | `4096` | Hops retained for `zenode trace`. `0` disables. |
@@ -90,7 +92,7 @@ async def on_start(self) -> None:
 | `every(interval, fn, *, name, on_error)` | → `Timer` |
 | `await call(service, request, *, timeout=2.0)` | → reply |
 | `spawn(coro, *, name)` | Tracked background task; a crash is logged. |
-| `await blocking(fn, *args)` | Run blocking code off the event loop. |
+| `await blocking(fn, *args)` | Run blocking code off the event loop. Required in `on_start` — see [Do not block in `on_start`](#do-not-block-in-on_start). |
 | `await wait_for_nodes(names, *, timeout=10.0)` | Gate startup on other nodes. |
 
 ## Handlers
@@ -235,7 +237,8 @@ start() → on_start() → bindings activated → running → stop() → on_stop
 
 `on_start` acquires resources — hardware, files, connections. `on_stop`
 releases them, and runs **whenever `on_start` was entered**, including when it
-raised part-way. Write it to tolerate partially initialised state:
+raised part-way or ran out of time. Write it to tolerate partially initialised
+state:
 
 ```python
 async def on_stop(self) -> None:
@@ -248,6 +251,46 @@ the first two.
 
 `run()` installs SIGINT and SIGTERM handlers, so `Ctrl-C` and `systemctl stop`
 both take the graceful path.
+
+### Do not block in `on_start`
+
+`on_start` runs on the event loop under `start_timeout` (30 s by default).
+Overrun it and the node tears down and raises `StartTimeout`, which `run()`
+turns into exit 1 — so a supervisor restarts a node wedged on hardware instead
+of leaving it in `starting` forever.
+
+That deadline is a loop timer, so it only fires while the loop can still run. A
+*synchronous* call in `on_start` blocks the timer along with everything else,
+including the signal handlers: a node parked inside `pipeline.start()` cannot be
+timed out, and does not answer `Ctrl-C` either. Push it to a thread:
+
+```python
+async def on_start(self) -> None:
+    self.pipeline = await self.blocking(open_camera, self.config.device)   # not open_camera(...)
+```
+
+Set `start_timeout = None` to wait indefinitely — reasonable for a node whose
+startup is genuinely long and not hardware-bound, less so for a driver.
+
+The health heartbeat is already ticking while `on_start` runs, deliberately:
+`zenode health` reporting `state="starting"` for twenty seconds is how a slow
+start becomes visible. It is the one thing live before `on_start` returns.
+
+### Nodes are single-use
+
+A node that has run and been stopped will not start again — `stop()` is latched,
+so a second `start()` would come up and exit again without a word. It raises
+instead; construct a new instance. A start that *failed* may be retried, since
+it left nothing declared.
+
+### Teardown is bounded
+
+`on_stop` runs first, then the node's background tasks are cancelled and joined
+for at most `shutdown_timeout` (5 s). Cancellation does not reach a task sitting
+in `blocking()` — an executor future cannot be interrupted once its thread is
+running — so an unbounded join would hand the process to SIGKILL. Tasks still
+going when the bound expires are named in a warning. Hardware is released either
+way, because `on_stop` has already run.
 
 ## Presence
 

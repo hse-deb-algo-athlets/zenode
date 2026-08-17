@@ -42,6 +42,7 @@ from .errors import (
     DuplicateNodeError,
     ServiceError,
     ServiceTimeout,
+    StartTimeout,
     ZenodeError,
 )
 from .log import setup_logging
@@ -83,6 +84,7 @@ __all__ = [
     "ServiceError",
     "ServiceServer",
     "ServiceTimeout",
+    "StartTimeout",
     "Subscription",
     "Timer",
     "Topic",

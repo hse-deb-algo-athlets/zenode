@@ -19,6 +19,10 @@ class DuplicateNodeError(ZenodeError):
     """A node with the same name is already live in the namespace."""
 
 
+class StartTimeout(ZenodeError):
+    """``on_start`` outran ``Node.start_timeout``."""
+
+
 class ServiceError(ZenodeError):
     """A service call failed on the remote side."""
 

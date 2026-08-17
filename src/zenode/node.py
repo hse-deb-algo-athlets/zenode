@@ -49,7 +49,7 @@ from .config import (
     load_transport_config,
 )
 from .declarative import Binding, collect_bindings, collect_publishers
-from .errors import ConfigError, ContractError, DuplicateNodeError
+from .errors import ConfigError, ContractError, DuplicateNodeError, StartTimeout
 from .log import LogPublisher, setup_logging
 from .metrics import ProcessStats, summarize
 from .msgs.health import NodeHealth, NodeState, health_key
@@ -110,6 +110,27 @@ class Node:
     because restarts and handovers legitimately overlap for a moment.
     Set ``False`` to make ``start()`` raise :class:`DuplicateNodeError`."""
 
+    start_timeout: ClassVar[float | None] = 30.0
+    """Seconds ``on_start`` may take before the node gives up, tears down, and
+    raises :class:`~zenode.errors.StartTimeout` — so a supervisor restarts a
+    node wedged on hardware instead of leaving it in ``starting`` forever.
+    ``None`` waits indefinitely.
+
+    This is a deadline on the *loop*, so it only fires while the loop can still
+    run: a synchronous call inside ``on_start`` blocks the timer with everything
+    else, and a node stuck in ``rs.pipeline.start()`` cannot be timed out or
+    even signalled. Acquire hardware through :meth:`blocking` and the deadline
+    means what it says."""
+
+    shutdown_timeout: ClassVar[float] = 5.0
+    """Seconds teardown waits for cancelled background tasks to actually finish.
+
+    A task parked in :meth:`blocking` does not stop when cancelled — an executor
+    future cannot be interrupted once its thread is running — so an unbounded
+    join hands the process to SIGKILL. ``on_stop`` has already run by then, so
+    the hardware is released either way; what the bound buys is a log line
+    naming the tasks that overstayed."""
+
     config: Any
 
     def __init__(
@@ -122,6 +143,16 @@ class Node:
     ) -> None:
         if not self.name:
             raise ContractError(f"{type(self).__name__} must set a class-level `name`")
+        if self.start_timeout is not None and self.start_timeout <= 0:
+            raise ContractError(
+                f"{type(self).__name__}.start_timeout must be positive or None, "
+                f"got {self.start_timeout!r}"
+            )
+        if self.shutdown_timeout <= 0:
+            raise ContractError(
+                f"{type(self).__name__}.shutdown_timeout must be positive, "
+                f"got {self.shutdown_timeout!r}"
+            )
         self._transport = transport if transport is not None else TransportConfig()
         self.namespace = self._transport.namespace if namespace is None else namespace
         self._session: zenoh.Session | None = session
@@ -146,6 +177,7 @@ class Node:
         self._state: NodeState = "stopped"
         self._started_monotonic = 0.0
         self._entered_on_start = False
+        self._has_run = False
         self._token: Any = None
         self._publishers: list[Publisher[Any]] = []
         self._subscriptions: list[Subscription[Any]] = []
@@ -161,15 +193,31 @@ class Node:
     # ------------------------------------------------------------------ hooks
 
     async def on_start(self) -> None:
-        """Acquire resources and declare publishers/subscriptions/services/timers here."""
+        """Acquire resources and declare publishers/subscriptions/services/timers here.
+
+        Runs on the event loop, under :attr:`start_timeout`. Anything that
+        blocks — opening a camera, loading model weights, probing a serial bus —
+        belongs in :meth:`blocking`, or it stalls the loop and takes the timeout
+        and the signal handlers down with it::
+
+            self.pipeline = await self.blocking(open_camera, self.config.device)
+
+        The health heartbeat is already ticking while this runs, deliberately:
+        ``zenode health`` reporting ``state="starting"`` for twenty seconds is
+        how a slow start becomes visible. Everything *else* is still quiet —
+        decorated bindings activate only after this returns.
+        """
 
     async def on_stop(self) -> None:
         """Release what ``on_start`` acquired, before the transport is torn down.
 
         Runs whenever ``on_start`` was *entered*, including when it raised
-        half-way — so it must tolerate partially initialized state (guard
-        with ``getattr``/``None`` checks). Exceptions raised here are logged;
-        teardown continues regardless.
+        half-way or ran past :attr:`start_timeout` — so it must tolerate
+        partially initialized state (guard with ``getattr``/``None`` checks).
+        Exceptions raised here are logged; teardown continues regardless.
+
+        It runs *before* the background tasks are joined, so hardware is safed
+        even when a task overstays :attr:`shutdown_timeout`.
         """
 
     # -------------------------------------------------------------- lifecycle
@@ -201,6 +249,21 @@ class Node:
         return tuple(self._timers)
 
     async def start(self) -> None:
+        """Bring the node up: session, presence, wiring, ``on_start``.
+
+        Single-use. A node that has run to completion is not restartable — its
+        ``stop()`` request is latched, so a second ``start()`` would come up and
+        exit again without a word. Saying so is the point; construct a new
+        instance instead. A start that *failed* may be retried, since it left
+        nothing declared.
+        """
+        if self._state != "stopped":
+            raise RuntimeError(f"node {self.name!r} is already {self._state}")
+        if self._has_run:
+            raise RuntimeError(
+                f"node {self.name!r} has already run and been stopped; "
+                "nodes are single-use — construct a new instance to run again"
+            )
         self._loop = asyncio.get_running_loop()
         self._state = "starting"
         self._started_monotonic = time.monotonic()
@@ -217,7 +280,7 @@ class Node:
                 self._health_pub = self.publisher(Topic(health_key(self.name), NodeHealth))
                 self.every(self.health_interval, self._publish_health, name="health")
             self._entered_on_start = True
-            await self.on_start()
+            await self._run_on_start()
             self._wire_bindings()
             # Last, so the node's own services keep the leading positions in
             # `_servers` and this one never displaces what the node declared.
@@ -235,7 +298,33 @@ class Node:
             self._state = "stopped"
             raise
         self._state = "running"
+        self._has_run = True
         self.log.info("started", extra={"namespace": self.namespace})
+
+    async def _run_on_start(self) -> None:
+        """``on_start`` under ``start_timeout``, named in the error if it trips.
+
+        ``asyncio.timeout`` rather than ``wait_for`` because the deadline has to
+        be told apart from the node's own failures: since 3.11 ``asyncio``'s
+        timeout *is* the builtin ``TimeoutError``, which is exactly what a
+        driver raises when an axis does not answer. Catching by type would
+        relabel that as "the node started too slowly" and send whoever reads it
+        after the wrong bug — ``expired()`` is the only reliable discriminator.
+        """
+        if self.start_timeout is None:
+            await self.on_start()
+            return
+        deadline = asyncio.timeout(self.start_timeout)
+        try:
+            async with deadline:
+                await self.on_start()
+        except TimeoutError:
+            if not deadline.expired():
+                raise  # on_start's own TimeoutError; it means something else
+            raise StartTimeout(
+                f"node {self.name!r}: on_start did not finish within "
+                f"start_timeout={self.start_timeout}s"
+            ) from None
 
     def adopt_session(
         self,
@@ -449,11 +538,7 @@ class Node:
         # Before cancelling the drain task, so nothing queues onto a publisher
         # that is about to be undeclared.
         self._stop_log_publishing()
-        for task in self._tasks:
-            task.cancel()
-        for task in self._tasks:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        await self._join_tasks()
         self._tasks.clear()
         self._timers.clear()
         for sub in self._subscriptions:
@@ -478,6 +563,30 @@ class Node:
                 self.log.debug("session close failed: %s", e)
         if self._session_owned:
             self._session = None
+
+    async def _join_tasks(self) -> None:
+        """Cancel the node's background tasks and wait, but not forever.
+
+        Cancellation does not reach a task sitting in :meth:`blocking`: an
+        executor future cannot be interrupted once its thread runs, so awaiting
+        it here would stall teardown for however long that call takes. Bound the
+        wait and name what is still going — the alternative is a process that
+        hangs on ``systemctl stop`` with nothing in the journal to say why.
+        """
+        if not self._tasks:
+            return
+        for task in self._tasks:
+            task.cancel()
+        # ``wait`` never re-raises, so a task that failed before cancellation
+        # cannot break teardown; ``spawn``'s done-callback has already logged it.
+        _, pending = await asyncio.wait(self._tasks, timeout=self.shutdown_timeout)
+        if pending:
+            self.log.warning(
+                "%d background task(s) still running after shutdown_timeout=%ss: %s",
+                len(pending),
+                self.shutdown_timeout,
+                ", ".join(sorted(task.get_name() for task in pending)),
+            )
 
     # ----------------------------------------------------------------- wiring
 
