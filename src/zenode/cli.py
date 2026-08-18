@@ -19,8 +19,10 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import queue
 import resource
+import signal
 import sys
 import threading
 import time
@@ -792,7 +794,19 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(fn=cmd_doctor)
 
     args = parser.parse_args(argv)
-    sys.exit(args.fn(args))
+    try:
+        status = args.fn(args)
+    except BrokenPipeError:
+        # `zenode topics | head -4` — the reader closing the pipe once it has
+        # what it wants is a normal end to the pipeline, not a failure, so it
+        # gets the same quiet treatment as the Ctrl-C every streaming command
+        # already swallows. Rebinding stdout matters: the interpreter flushes
+        # it once more on the way out, and without somewhere harmless to land
+        # that flush hits the dead pipe again and prints "Exception ignored on
+        # flushing sys.stdout" after we have already exited cleanly.
+        sys.stdout = open(os.devnull, "w")  # noqa: SIM115 — outlives this frame
+        status = 128 + signal.SIGPIPE  # what a shell reports for a SIGPIPE death
+    sys.exit(status)
 
 
 if __name__ == "__main__":

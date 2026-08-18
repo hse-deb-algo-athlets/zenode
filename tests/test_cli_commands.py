@@ -7,6 +7,10 @@ which exit code), not zenoh's ability to open a socket.
 
 from __future__ import annotations
 
+import errno
+import io
+import os
+import signal
 import sys
 import time
 from types import SimpleNamespace
@@ -777,3 +781,26 @@ def test_main_makes_stdout_line_buffered(monkeypatch, capsys):
     with pytest.raises(SystemExit):
         main(["--version"])
     assert calls == [True]
+
+
+def test_main_exits_quietly_when_the_reader_closes_the_pipe(monkeypatch):
+    """``zenode topics | head -4`` — head is done, we are not a failed command.
+
+    Swallowing the error is only half of it: the interpreter flushes stdout
+    again on the way out, so stdout has to point somewhere harmless or that
+    flush hits the dead pipe and prints "Exception ignored on flushing
+    sys.stdout" after we have already exited.
+    """
+
+    def closed_pipe(_args):
+        raise BrokenPipeError(errno.EPIPE, "Broken pipe")
+
+    monkeypatch.setattr("zenode.cli.cmd_topics", closed_pipe)
+    monkeypatch.setattr("zenode.cli.sys.stdout", io.StringIO())  # restored on teardown
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["topics"])
+
+    assert exit_info.value.code == 128 + signal.SIGPIPE
+    assert sys.stdout.name == os.devnull
+    sys.stdout.close()
