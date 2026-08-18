@@ -4,6 +4,7 @@ import asyncio
 import time
 
 import pytest
+from conftest import internals
 from pydantic import BaseModel
 
 from zenode import Node, Service, Topic, every, serve, subscribe
@@ -143,7 +144,7 @@ async def test_service_handler_time_reaches_health():
         out = h.collect(Topic("node/svc/health", NodeHealth))
         node = await h.start_node(Server)
         await h.call(SLOW_SVC, Ping(n=1))
-        assert node._servers[0].handler_time.count == 1
+        assert internals(node).servers[0].handler_time.count == 1
         health = await _next_health(out, lambda h: h.handler_max_ms > 0)
         assert health.handler_max_ms >= 45.0
 
@@ -258,10 +259,10 @@ async def test_handler_that_raises_is_still_timed():
         node = await h.start_node(Boom)
         h.publisher(SLOW).put(Ping(n=1))
         for _ in range(40):
-            if node._subscriptions[0].errors:
+            if node.subscriptions[0].errors:
                 break
             await asyncio.sleep(0.05)
-        sub = node._subscriptions[0]
+        sub = node.subscriptions[0]
         assert sub.errors == 1
         assert sub.handler_time.max_s >= 0.025
 

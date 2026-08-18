@@ -99,6 +99,33 @@ def _config_model(node_class: type[Node]) -> type[BaseModel] | None:
     return None
 
 
+_OVERRIDE_POINTS = frozenset(
+    {
+        "name",
+        "config",
+        "on_start",
+        "on_stop",
+        "allow_duplicates",
+        "health_interval",
+        "publish_logs_at",
+        "shm_pool_bytes",
+        "shutdown_timeout",
+        "start_timeout",
+        "trace_ring",
+    }
+)
+"""The names of zenode's own that a subclass is *meant* to redefine."""
+
+_INSTANCE_API = frozenset({"log", "namespace"})
+"""Public attributes ``__init__`` sets on the instance rather than the class.
+
+``dir(Node)`` cannot see these, which is exactly what makes them dangerous: a
+subclass method named ``log`` is not flagged by any IDE and is then silently
+replaced by the instance attribute at construction. Kept here so the subclass
+guard covers them; ``test_node_namespace.py`` asserts the list against reality.
+"""
+
+
 class Node:
     """Base class for all nodes. Subclasses must set a class-level ``name``."""
 
@@ -151,6 +178,35 @@ class Node:
 
     config: Any
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Refuse a subclass that redefines a name the runtime owns.
+
+        Two different collisions, and only one of them is visible. A subclass
+        *method* that lands on a runtime method overrides it — ordinary Python,
+        which an IDE flags. A subclass method that lands on an attribute
+        ``__init__`` sets is resolved the other way: the instance attribute wins,
+        the method becomes unreachable during construction, and nothing warns.
+        That second kind is why every attribute here is mangled to ``_Node__*``,
+        which puts it beyond reach of any subclass name.
+
+        What mangling cannot cover is the API a subclass is *supposed* to see, so
+        that is what this refuses — at import, rather than on the first message.
+
+        Widening :data:`_OVERRIDE_POINTS` is a contract change: those names are
+        read off the *class*, so the runtime keeps working when a subclass
+        supplies its own.
+        """
+        super().__init_subclass__(**kwargs)
+        reserved = {n for n in dir(Node) if not n.startswith("__")} | _INSTANCE_API
+        clash = sorted((set(vars(cls)) & reserved) - _OVERRIDE_POINTS)
+        if clash:
+            raise ContractError(
+                f"{cls.__name__} redefines names zenode owns: {', '.join(clash)}. "
+                f"A subclass attribute silently shadows the runtime's own instead of "
+                f"overriding it, so rename yours. Redefinable: "
+                f"{', '.join(sorted(_OVERRIDE_POINTS))}."
+            )
+
     def __init__(
         self,
         *,
@@ -171,10 +227,10 @@ class Node:
                 f"{type(self).__name__}.shutdown_timeout must be positive, "
                 f"got {self.shutdown_timeout!r}"
             )
-        self._transport = transport if transport is not None else TransportConfig()
-        self.namespace = self._transport.namespace if namespace is None else namespace
-        self._session: zenoh.Session | None = session
-        self._session_owned = session is None
+        self.__transport = transport if transport is not None else TransportConfig()
+        self.namespace = self.__transport.namespace if namespace is None else namespace
+        self.__session: zenoh.Session | None = session
+        self.__session_owned = session is None
         self.log = node_logger(self.name)
 
         if config is not None:
@@ -190,23 +246,23 @@ class Node:
                         f"({model.__name__} has required fields): {e}"
                     ) from e
 
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._stop_event = asyncio.Event()
-        self._state: NodeState = "stopped"
-        self._started_monotonic = 0.0
-        self._entered_on_start = False
-        self._has_run = False
-        self._token: Any = None
-        self._publishers: list[Publisher[Any]] = []
-        self._subscriptions: list[Subscription[Any]] = []
-        self._servers: list[ServiceServer[Any, Any]] = []
-        self._timers: list[Timer] = []
-        self._tasks: list[asyncio.Task[Any]] = []
-        self._health_pub: Publisher[NodeHealth] | None = None
-        self._log_handler: LogPublisher | None = None
-        self._process = ProcessStats()
-        self._ring = TraceRing(self.trace_ring) if self.trace_ring else None
-        self._shm = ShmPool(self.shm_pool_bytes, log=self.log)
+        self.__loop: asyncio.AbstractEventLoop | None = None
+        self.__stop_event = asyncio.Event()
+        self.__state: NodeState = "stopped"
+        self.__started_monotonic = 0.0
+        self.__entered_on_start = False
+        self.__has_run = False
+        self.__token: Any = None
+        self.__publishers: list[Publisher[Any]] = []
+        self.__subscriptions: list[Subscription[Any]] = []
+        self.__servers: list[ServiceServer[Any, Any]] = []
+        self.__timers: list[Timer] = []
+        self.__tasks: list[asyncio.Task[Any]] = []
+        self.__health_pub: Publisher[NodeHealth] | None = None
+        self.__log_handler: LogPublisher | None = None
+        self.__process = ProcessStats()
+        self.__ring = TraceRing(self.trace_ring) if self.trace_ring else None
+        self.__shm = ShmPool(self.shm_pool_bytes, log=self.log)
 
     # ------------------------------------------------------------------ hooks
 
@@ -242,13 +298,13 @@ class Node:
 
     @property
     def session(self) -> zenoh.Session:
-        if self._session is None:
+        if self.__session is None:
             raise RuntimeError(f"node {self.name!r} is not started")
-        return self._session
+        return self.__session
 
     @property
     def state(self) -> NodeState:
-        return self._state
+        return self.__state
 
     @property
     def subscriptions(self) -> tuple[Subscription[Any], ...]:
@@ -259,12 +315,12 @@ class Node:
 
             dropped = sum(s.dropped for s in self.subscriptions if s.topic is Topics.cmd_vel)
         """
-        return tuple(self._subscriptions)
+        return tuple(self.__subscriptions)
 
     @property
     def timers(self) -> tuple[Timer, ...]:
         """Every timer of this node, with its tick/overrun/error counters."""
-        return tuple(self._timers)
+        return tuple(self.__timers)
 
     async def start(self) -> None:
         """Bring the node up: session, presence, wiring, ``on_start``.
@@ -275,21 +331,21 @@ class Node:
         instance instead. A start that *failed* may be retried, since it left
         nothing declared.
         """
-        if self._state != "stopped":
-            raise RuntimeError(f"node {self.name!r} is already {self._state}")
-        if self._has_run:
+        if self.__state != "stopped":
+            raise RuntimeError(f"node {self.name!r} is already {self.__state}")
+        if self.__has_run:
             raise RuntimeError(
                 f"node {self.name!r} has already run and been stopped; "
                 "nodes are single-use — construct a new instance to run again"
             )
-        self._loop = asyncio.get_running_loop()
-        self._state = "starting"
-        self._started_monotonic = time.monotonic()
-        if self._session is None:
-            self._session = await asyncio.to_thread(zenoh.open, self._transport.to_zenoh_config())
+        self.__loop = asyncio.get_running_loop()
+        self.__state = "starting"
+        self.__started_monotonic = time.monotonic()
+        if self.__session is None:
+            self.__session = await asyncio.to_thread(zenoh.open, self.__transport.to_zenoh_config())
         try:
             await self._check_duplicate()
-            self._token = self.session.liveliness().declare_token(
+            self.__token = self.session.liveliness().declare_token(
                 presence_key(self.namespace, self.name)
             )
             self._materialize_publishers()
@@ -299,16 +355,16 @@ class Node:
                 # must not take the link from control traffic. Not `background`
                 # like the logs, though — the heartbeat is fixed-rate and tiny,
                 # and it is what tells an operator the node is alive at all.
-                self._health_pub = self.publisher(
+                self.__health_pub = self.publisher(
                     Topic(health_key(self.name), NodeHealth, priority="data_low")
                 )
                 self.every(self.health_interval, self._publish_health, name="health")
-            self._entered_on_start = True
+            self.__entered_on_start = True
             await self._run_on_start()
             self._wire_bindings()
             # Last, so the node's own services keep the leading positions in
             # `_servers` and this one never displaces what the node declared.
-            if self._ring is not None:
+            if self.__ring is not None:
                 self.serve(
                     Service(trace_key(self.name), request=TraceQuery, reply=TraceHops),
                     self._answer_trace,
@@ -319,10 +375,10 @@ class Node:
             # would otherwise leave motors armed and sockets open.
             await self._safe_on_stop()
             await self._teardown()
-            self._state = "stopped"
+            self.__state = "stopped"
             raise
-        self._state = "running"
-        self._has_run = True
+        self.__state = "running"
+        self.__has_run = True
         self.log.info("started", extra={"namespace": self.namespace})
 
     async def _run_on_start(self) -> None:
@@ -363,12 +419,12 @@ class Node:
         a node the test constructed itself (with fakes, or a custom
         ``__init__``) on the harness's in-process session.
         """
-        if self._state != "stopped":
-            raise RuntimeError(f"node {self.name!r} is already {self._state}")
-        self._session = session
-        self._session_owned = False
+        if self.__state != "stopped":
+            raise RuntimeError(f"node {self.name!r} is already {self.__state}")
+        self.__session = session
+        self.__session_owned = False
         if transport is not None:
-            self._transport = transport
+            self.__transport = transport
         if namespace is not None:
             self.namespace = namespace
 
@@ -415,30 +471,30 @@ class Node:
         The drain task is tracked like any other, so teardown cancels it before
         the publisher goes away.
         """
-        if self.publish_logs_at is None or self._loop is None:
+        if self.publish_logs_at is None or self.__loop is None:
             return
         # The lowest band, because log volume spikes exactly when something is
         # going wrong — which is also when the control traffic sharing the link
         # can least afford to queue behind a burst of records. Records lost that
         # way are still on stderr, where a local journal keeps them.
         publisher = self.publisher(Topic(log_key(self.name), LogRecordMsg, priority="background"))
-        handler = LogPublisher(publisher, self.name, self._loop)
+        handler = LogPublisher(publisher, self.name, self.__loop)
         handler.setLevel(self.publish_logs_at.upper())
         self.log.addHandler(handler)
-        self._log_handler = handler
+        self.__log_handler = handler
         self.spawn(handler.drain(), name="logs")
 
     def _answer_trace(self, request: TraceQuery) -> TraceHops:
         """This node's view of one trace, for ``zenode trace``."""
-        ring = self._ring
+        ring = self.__ring
         return TraceHops(node=self.name, hops=ring.hops(request.trace_id) if ring else [])
 
     def _stop_log_publishing(self) -> None:
-        if self._log_handler is None:
+        if self.__log_handler is None:
             return
-        self.log.removeHandler(self._log_handler)
-        self._log_handler.close()
-        self._log_handler = None
+        self.log.removeHandler(self.__log_handler)
+        self.__log_handler.close()
+        self.__log_handler = None
 
     def _wire_bindings(self) -> None:
         """Activate ``@subscribe``/``@serve``/``@every``/``@on_silence``/``@on_matching``.
@@ -499,7 +555,7 @@ class Node:
         if not isinstance(binding.target, Topic):  # pragma: no cover - decorators enforce this
             raise ContractError(f"{where}: target must be a Topic")
         key = binding.target.resolve(self.namespace)
-        matches = [sub for sub in self._subscriptions if sub.key == key]
+        matches = [sub for sub in self.__subscriptions if sub.key == key]
         if not matches:
             raise ContractError(f"{where}: nothing on this node subscribes {key!r}")
         armed = [sub for sub in matches if sub.deadline is not None]
@@ -526,71 +582,71 @@ class Node:
         if not isinstance(binding.target, Topic):  # pragma: no cover - decorators enforce this
             raise ContractError(f"{where}: target must be a Topic")
         key = binding.target.resolve(self.namespace)
-        matches = [pub for pub in self._publishers if pub.key == key]
+        matches = [pub for pub in self.__publishers if pub.key == key]
         if not matches:
             raise ContractError(f"{where}: nothing on this node publishes {key!r}")
         for pub in matches:
             pub.on_matching(handler)
 
     async def shutdown(self) -> None:
-        if self._state in ("stopping", "stopped"):
+        if self.__state in ("stopping", "stopped"):
             return
-        self._state = "stopping"
+        self.__state = "stopping"
         await self._safe_on_stop()
         await self._teardown()
-        self._state = "stopped"
+        self.__state = "stopped"
         self.log.info("stopped")
 
     async def _safe_on_stop(self) -> None:
         """Run ``on_stop`` once, if ``on_start`` was entered; never raise."""
-        if not self._entered_on_start:
+        if not self.__entered_on_start:
             return
-        self._entered_on_start = False
+        self.__entered_on_start = False
         try:
             await self.on_stop()
         except Exception:
             self.log.exception("on_stop raised")
 
     async def run_until_stopped(self) -> None:
-        await self._stop_event.wait()
+        await self.__stop_event.wait()
 
     def stop(self) -> None:
         """Request shutdown. Safe to call from any thread or signal handler."""
-        loop = self._loop
+        loop = self.__loop
         if loop is not None and loop.is_running():
-            loop.call_soon_threadsafe(self._stop_event.set)
+            loop.call_soon_threadsafe(self.__stop_event.set)
         else:
-            self._stop_event.set()
+            self.__stop_event.set()
 
     async def _teardown(self) -> None:
         # Before cancelling the drain task, so nothing queues onto a publisher
         # that is about to be undeclared.
         self._stop_log_publishing()
         await self._join_tasks()
-        self._tasks.clear()
-        self._timers.clear()
-        for sub in self._subscriptions:
+        self.__tasks.clear()
+        self.__timers.clear()
+        for sub in self.__subscriptions:
             await sub.stop()
-        self._subscriptions.clear()
-        for server in self._servers:
+        self.__subscriptions.clear()
+        for server in self.__servers:
             server.undeclare()
-        self._servers.clear()
-        for pub in self._publishers:
+        self.__servers.clear()
+        for pub in self.__publishers:
             pub.undeclare()
-        self._publishers.clear()
-        if self._token is not None:
+        self.__publishers.clear()
+        if self.__token is not None:
             try:
-                self._token.undeclare()
+                self.__token.undeclare()
             except Exception as e:
                 self.log.debug("undeclare liveliness token failed: %s", e)
-            self._token = None
-        if self._session is not None and self._session_owned:
+            self.__token = None
+        if self.__session is not None and self.__session_owned:
             try:
-                await asyncio.to_thread(self._session.close)
+                await asyncio.to_thread(self.__session.close)
             except Exception as e:
                 self.log.debug("session close failed: %s", e)
-        if self._session_owned:
-            self._session = None
+        if self.__session_owned:
+            self.__session = None
 
     async def _join_tasks(self) -> None:
         """Cancel the node's background tasks and wait, but not forever.
@@ -601,13 +657,13 @@ class Node:
         wait and name what is still going — the alternative is a process that
         hangs on ``systemctl stop`` with nothing in the journal to say why.
         """
-        if not self._tasks:
+        if not self.__tasks:
             return
-        for task in self._tasks:
+        for task in self.__tasks:
             task.cancel()
         # ``wait`` never re-raises, so a task that failed before cancellation
         # cannot break teardown; ``spawn``'s done-callback has already logged it.
-        _, pending = await asyncio.wait(self._tasks, timeout=self.shutdown_timeout)
+        _, pending = await asyncio.wait(self.__tasks, timeout=self.shutdown_timeout)
         if pending:
             self.log.warning(
                 "%d background task(s) still running after shutdown_timeout=%ss: %s",
@@ -642,7 +698,7 @@ class Node:
             )
         else:
             inner = self.session.declare_publisher(key, **qos)
-        if topic.shm and not self._transport.shared_memory:
+        if topic.shm and not self.__transport.shared_memory:
             # Publishing still works, just with the copy shm=True was meant to
             # avoid — and silently, which is the part worth warning about.
             self.log.warning(
@@ -651,9 +707,9 @@ class Node:
                 extra={"key": key},
             )
         pub = Publisher(
-            inner, topic=topic, key=key, node_name=self.name, pool=self._shm, log=self.log
+            inner, topic=topic, key=key, node_name=self.name, pool=self.__shm, log=self.log
         )
-        self._publishers.append(pub)
+        self.__publishers.append(pub)
         return pub
 
     def subscribe(
@@ -680,14 +736,14 @@ class Node:
         React with ``on_deadline`` (see :data:`~zenode.pubsub.OnDeadline`) or,
         for a named method, with ``@on_silence``/``@on_resume``.
         """
-        if self._loop is None:
+        if self.__loop is None:
             raise RuntimeError("subscribe() must be called after start (e.g. in on_start)")
         key = topic.resolve(self.namespace)
         sub = Subscription(
             topic,
             key,
             handler,
-            self._loop,
+            self.__loop,
             mode=mode,
             queue_size=queue_size,
             deadline=deadline,
@@ -695,7 +751,7 @@ class Node:
             stop=self.stop,
             log=self.log,
             node_name=self.name,
-            ring=self._ring,
+            ring=self.__ring,
         )
         if topic.latched:
             inner: Any = zext.declare_advanced_subscriber(
@@ -706,25 +762,25 @@ class Node:
             )
         else:
             inner = self.session.declare_subscriber(key, sub._zenoh_callback)
-        task = self._loop.create_task(sub._consume(), name=f"{self.name}:sub:{key}")
+        task = self.__loop.create_task(sub._consume(), name=f"{self.name}:sub:{key}")
         sub._attach(inner, task)
-        self._subscriptions.append(sub)
+        self.__subscriptions.append(sub)
         return sub
 
     def serve(
         self, service: Service[Req, Rep], handler: ServiceHandler[Req, Rep]
     ) -> ServiceServer[Req, Rep]:
-        if self._loop is None:
+        if self.__loop is None:
             raise RuntimeError("serve() must be called after start (e.g. in on_start)")
         key = service.resolve(self.namespace)
         # Explicit type arguments: inference would otherwise solve Rep from the
         # handler's `Rep | Awaitable[Rep]` return and clash with Service's invariance.
         server = ServiceServer[Req, Rep](
-            service, key, handler, self._loop, log=self.log, node_name=self.name, ring=self._ring
+            service, key, handler, self.__loop, log=self.log, node_name=self.name, ring=self.__ring
         )
         inner = self.session.declare_queryable(key, server._zenoh_callback)
         server._attach(inner)
-        self._servers.append(server)
+        self.__servers.append(server)
         return server
 
     async def call(self, service: Service[Req, Rep], request: Req, *, timeout: float = 2.0) -> Rep:
@@ -768,16 +824,16 @@ class Node:
             stop=self.stop,
         )
         timer.task = self.spawn(timer.run(), name=f"timer:{timer.name}")
-        self._timers.append(timer)
+        self.__timers.append(timer)
         return timer
 
     def spawn(
         self, coro: Coroutine[Any, Any, Any], *, name: str | None = None
     ) -> asyncio.Task[Any]:
         """Track a background task for the node's lifetime; crash is logged."""
-        if self._loop is None:
+        if self.__loop is None:
             raise RuntimeError("spawn() must be called after start (e.g. in on_start)")
-        task = self._loop.create_task(coro, name=f"{self.name}:{name or 'task'}")
+        task = self.__loop.create_task(coro, name=f"{self.name}:{name or 'task'}")
 
         def _done(t: asyncio.Task[Any]) -> None:
             if not t.cancelled() and t.exception() is not None:
@@ -788,7 +844,7 @@ class Node:
                 )
 
         task.add_done_callback(_done)
-        self._tasks.append(task)
+        self.__tasks.append(task)
         return task
 
     async def blocking(self, fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
@@ -813,33 +869,33 @@ class Node:
     # ----------------------------------------------------------------- health
 
     def _publish_health(self) -> None:
-        if self._health_pub is None:
+        if self.__health_pub is None:
             return
-        ages = [s.age for s in self._subscriptions]
-        handlers = [s.handler_time for s in self._subscriptions]
-        handlers += [srv.handler_time for srv in self._servers]
+        ages = [s.age for s in self.__subscriptions]
+        handlers = [s.handler_time for s in self.__subscriptions]
+        handlers += [srv.handler_time for srv in self.__servers]
         age_mean_ms, age_max_ms = summarize(ages)
         handler_mean_ms, handler_max_ms = summarize(handlers)
-        self._health_pub.put(
+        self.__health_pub.put(
             NodeHealth(
                 node=self.name,
-                state=self._state,
-                uptime_s=time.monotonic() - self._started_monotonic,
-                sent=sum(p.sent for p in self._publishers),
-                received=sum(s.received for s in self._subscriptions),
-                dropped=sum(s.dropped for s in self._subscriptions),
-                stale=sum(s.stale for s in self._subscriptions),
-                handler_errors=sum(s.errors for s in self._subscriptions)
-                + sum(srv.errors for srv in self._servers)
-                + sum(t.errors for t in self._timers)
-                + sum(p.errors for p in self._publishers),
-                timer_overruns=sum(t.overruns for t in self._timers),
-                deadline_misses=sum(s.deadline_misses for s in self._subscriptions),
-                logs_dropped=self._log_handler.dropped if self._log_handler else 0,
-                shm_fallbacks=self._shm.fallbacks,
-                cpu_percent=self._process.cpu_percent(),
-                rss_bytes=self._process.rss_bytes(),
-                queue_max_depth=max((s.queue_peak for s in self._subscriptions), default=0),
+                state=self.__state,
+                uptime_s=time.monotonic() - self.__started_monotonic,
+                sent=sum(p.sent for p in self.__publishers),
+                received=sum(s.received for s in self.__subscriptions),
+                dropped=sum(s.dropped for s in self.__subscriptions),
+                stale=sum(s.stale for s in self.__subscriptions),
+                handler_errors=sum(s.errors for s in self.__subscriptions)
+                + sum(srv.errors for srv in self.__servers)
+                + sum(t.errors for t in self.__timers)
+                + sum(p.errors for p in self.__publishers),
+                timer_overruns=sum(t.overruns for t in self.__timers),
+                deadline_misses=sum(s.deadline_misses for s in self.__subscriptions),
+                logs_dropped=self.__log_handler.dropped if self.__log_handler else 0,
+                shm_fallbacks=self.__shm.fallbacks,
+                cpu_percent=self.__process.cpu_percent(),
+                rss_bytes=self.__process.rss_bytes(),
+                queue_max_depth=max((s.queue_peak for s in self.__subscriptions), default=0),
                 age_mean_ms=age_mean_ms,
                 age_max_ms=age_max_ms,
                 handler_mean_ms=handler_mean_ms,
@@ -851,7 +907,7 @@ class Node:
         # last, so one startup spike cannot dominate the number for hours.
         for accumulator in (*ages, *handlers):
             accumulator.reset()
-        for subscription in self._subscriptions:
+        for subscription in self.__subscriptions:
             subscription.queue_peak = 0
 
 

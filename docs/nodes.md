@@ -44,6 +44,44 @@ run(Nav)
 | `trace_ring` | `4096` | Hops retained for `zenode trace`. `0` disables. |
 | `shm_pool_bytes` | 64 MiB | Shared-memory pool, created on first use. |
 
+Those eight, plus `config`, `on_start` and `on_stop`, are the only names of
+zenode's own that a subclass may redefine.
+
+## The shared namespace
+
+A node subclasses `Node`, so the two share one namespace and every name the
+runtime holds is a name your node cannot have. Two mechanisms keep that from
+being a trap.
+
+**Runtime state is name-mangled.** Everything `__init__` sets lives at
+`_Node__loop`, `_Node__session`, `_Node__tasks` and so on, so `_state`,
+`_process`, `_tasks`, `_timers` and the rest of the obvious private names are
+yours to use. This matters more than it sounds: Python resolves an instance
+attribute *before* a class method, so an unmangled `self._process` assigned
+during construction would not override your `_process` method — it would make it
+unreachable, silently, with the failure surfacing later as a `TypeError` at the
+first call.
+
+**Collisions with the public API are refused at import.** Defining a method or
+attribute that lands on one of `Node`'s own raises `ContractError` when the class
+is created, naming what clashed:
+
+```python
+class Detector(Node):
+    name = "detector"
+
+    def state(self) -> str:        # ContractError: Detector redefines names
+        return "busy"              # zenode owns: state.
+```
+
+`log` and `namespace` are covered too. Both are set on the instance rather than
+the class, so `dir(Node)` does not list them and no IDE will warn you — which is
+exactly why the guard carries them explicitly.
+
+Overriding a *private* method (`_teardown`, `_wire_bindings`) is refused on the
+same grounds. If you want a name the guard reserves, rename yours; nothing in
+the runtime is designed to be replaced except the attributes in the table above.
+
 ## Wiring
 
 Declarative and imperative wiring do the same thing; the decorators only stamp

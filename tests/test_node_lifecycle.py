@@ -13,6 +13,7 @@ import logging
 import threading
 
 import pytest
+from conftest import internals
 from pydantic import BaseModel
 
 from zenode import Node, NodeConfig, Service, Topic, run
@@ -221,8 +222,8 @@ async def test_a_failed_start_leaves_nothing_declared():
             await node.start()
 
     assert node.state == "stopped"
-    assert node._publishers == []
-    assert node._token is None
+    assert internals(node).publishers == []
+    assert internals(node).token is None
 
 
 class HalfOpen(Node):
@@ -355,8 +356,8 @@ async def test_an_on_start_that_overruns_its_timeout_tears_the_node_down():
 
     assert node.released, "the failure path must still run on_stop"
     assert node.state == "stopped"
-    assert node._publishers == []
-    assert node._token is None
+    assert internals(node).publishers == []
+    assert internals(node).token is None
 
 
 @pytest.mark.integration

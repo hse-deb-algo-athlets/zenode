@@ -4,6 +4,7 @@ import asyncio
 import time
 
 import pytest
+from conftest import internals
 from pydantic import BaseModel
 
 from zenode import Node, Topic, subscribe, trace
@@ -110,7 +111,7 @@ def test_capacity_zero_means_the_node_builds_no_ring():
         name = "ringless"
         trace_ring = 0
 
-    assert Ringless()._ring is None
+    assert internals(Ringless()).ring is None
 
 
 # --------------------------------------------------------------- end-to-end

@@ -11,10 +11,12 @@ import argparse
 import sys
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from zenode import Node
 from zenode import topic as topic_module
 from zenode.testing import Harness, harness
 
@@ -111,3 +113,21 @@ def cli_args() -> Any:
         return argparse.Namespace(**{**base, **overrides})
 
     return make
+
+
+def internals(node: Node) -> Any:
+    """Read ``Node``'s name-mangled runtime state as plain attributes.
+
+    A handful of tests assert on state that is deliberately not public API —
+    that teardown emptied the publisher list, that ``trace_ring = 0`` really
+    builds no ring. Mangling puts those behind ``_Node__*``, which neither type
+    checker will resolve and which reads as noise at the call site. Routing them
+    through here keeps the reach-past-the-boundary in one place that says why.
+    """
+    return SimpleNamespace(
+        **{
+            key.removeprefix("_Node__"): value
+            for key, value in vars(node).items()
+            if key.startswith("_Node__")
+        }
+    )
