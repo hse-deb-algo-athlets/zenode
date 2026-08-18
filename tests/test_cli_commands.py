@@ -240,6 +240,24 @@ def test_topics_shows_delivery_flags(cli_args, capsys):
     assert "shm" in out
 
 
+@pytest.mark.usefixtures("isolated_registry")
+def test_topics_shows_qos_only_when_it_differs_from_the_default(cli_args, capsys):
+    """QoS is a per-topic exception; printing it on every row hides the exceptions."""
+
+    class _Demo(TopicSet):
+        plain = Topic("state/plain", Ping)
+        urgent = Topic("command/stop", Ping, priority="real_time", express=True)
+        lossless = Topic("command/mode", Ping, congestion_control="block")
+
+    cmd_topics(cli_args())
+    out = capsys.readouterr().out
+    assert "prio=real_time" in out
+    assert "express" in out
+    assert "block" in out
+    assert "prio=data" not in out
+    assert "drop" not in out
+
+
 # --------------------------------------------------- driving the watch loops
 
 

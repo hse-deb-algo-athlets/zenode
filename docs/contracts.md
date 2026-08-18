@@ -30,12 +30,15 @@ CMD = Topic("command/cmd_vel", Twist, max_age=0.5)
 | `trace` | `False` | Publishing starts a trace — see [Observability](open-telemetry.md). |
 | `trace_ratio` | `1.0` | Fraction of traces started here that are recorded. |
 | `shm` | `False` | Publish through shared memory — see [Shared memory](shared-memory.md). |
+| `priority` | `"data"` | Transmission priority band on a congested link. |
+| `congestion_control` | `"drop"` | `"drop"` or `"block"` when the transmit queue is full. |
+| `express` | `False` | Send immediately instead of batching. |
 | `description` | `""` | Free text, shown by `zenode topics`. |
 
 Invalid combinations raise `ContractError` at import time rather than failing
 at runtime: an empty or whitespace-containing key, a non-positive `max_age`, a
-`history` below 1, a `trace_ratio` outside 0–1, or a `trace_ratio` on a topic
-that is not a trace root.
+`history` below 1, a `trace_ratio` outside 0–1, a `trace_ratio` on a topic
+that is not a trace root, or an unknown `priority`/`congestion_control`.
 
 ### Keys and namespaces
 
@@ -70,6 +73,51 @@ publishes dropped. Drops are counted as `stale` and warned about.
 producer that stopped, because a message that never arrives is never checked.
 For that, see [silence detection](nodes.md#silence-detection), which is
 declared on the subscription rather than the topic.
+
+### Quality of service
+
+The three QoS parameters are fixed when the publisher is declared and apply to
+every message on the topic. They only matter once a link is actually congested;
+on an idle link all three are invisible.
+
+**`priority`** picks a transmission band. Highest to lowest: `real_time`,
+`interactive_high`, `interactive_low`, `data_high`, `data` (the default),
+`data_low`, `background`. Zenoh drains higher bands first, so this is how a
+control topic keeps precedence over bulk telemetry on the same link:
+
+```python
+CMD = Topic("command/cmd_vel", Twist, priority="real_time", max_age=0.5)
+CAMERA = Topic("camera/rgb", bytes, codec=RawCodec(Encoding.IMAGE_JPEG),
+               priority="data_low", shm=True)
+```
+
+Only the *relative* order matters. Raising every topic to `real_time` restores
+exactly the situation you started from, so spend the bands on the handful of
+topics that genuinely outrank the rest.
+
+zenode's own runtime traffic is already placed below application data: the
+health heartbeat publishes at `data_low` and the log stream at `background`, so
+a node that starts logging hard cannot push control messages off the link.
+
+**`congestion_control`** decides what happens when the transmit queue is full.
+The default `"drop"` discards the message, which is what you want for a stream
+where the next sample supersedes this one — a pose at 30 Hz, a camera frame.
+`"block"` waits for the queue to drain instead, for low-rate topics where a
+lost message is a fault rather than a skipped frame.
+
+> `"block"` blocks the calling thread, and `put()` normally runs on the node's
+> event loop — so a stalled link stalls every timer, handler and signal handler
+> in the process, the same failure mode [`Node.blocking`](nodes.md) exists to
+> avoid. Use it on low-rate topics, and not from a handler that has to keep
+> running regardless.
+
+**`express`** sends each message on its own instead of batching it with
+whatever else is queued, trading throughput for a little latency. It is worth
+it for small, infrequent, latency-critical messages, and counterproductive on a
+high-rate stream, where batching is what keeps the per-message overhead down.
+
+`zenode topics` shows all three as flags, but only when they differ from the
+default — so the listing highlights the topics that claim an exception.
 
 ## Service
 

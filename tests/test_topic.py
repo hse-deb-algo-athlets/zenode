@@ -1,3 +1,5 @@
+from typing import Any
+
 import pytest
 from pydantic import BaseModel
 
@@ -11,6 +13,7 @@ from zenode import (
     registered_topics,
 )
 from zenode.errors import ContractError
+from zenode.topic import PRIORITIES
 
 
 class Msg(BaseModel):
@@ -87,3 +90,30 @@ def test_trace_ratio_without_a_root_is_an_error():
     """It would silently do nothing: a non-root never starts a trace to sample."""
     with pytest.raises(ContractError, match="no effect without trace=True"):
         Topic("t/d", Msg, trace_ratio=0.1)
+
+
+# ------------------------------------------------------------------------ QoS
+
+
+def test_qos_defaults_match_zenoh():
+    t = Topic("q/a", Msg)
+    assert (t.priority, t.congestion_control, t.express) == ("data", "drop", False)
+
+
+def test_qos_accepts_every_priority_band():
+    for band in PRIORITIES:
+        assert Topic("q/b", Msg, priority=band).priority == band
+
+
+def test_qos_rejects_an_unknown_priority():
+    """A type checker catches this statically; the guard is for whoever has none."""
+    typo: Any = "realtime"
+    with pytest.raises(ContractError, match="priority must be one of"):
+        Topic("q/c", Msg, priority=typo)
+
+
+def test_qos_rejects_an_unknown_congestion_control():
+    """`block_first` is real in zenoh but flagged unstable, so zenode does not expose it."""
+    unsupported: Any = "block_first"
+    with pytest.raises(ContractError, match="congestion_control must be one of"):
+        Topic("q/d", Msg, congestion_control=unsupported)

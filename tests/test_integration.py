@@ -152,6 +152,25 @@ async def test_latched_topic_delivers_to_late_joiner():
         assert result == Ping(value=7)
 
 
+async def test_topic_qos_reaches_the_zenoh_publisher():
+    """QoS is fixed at declare time, so a dropped parameter is invisible at runtime."""
+    import zenoh
+
+    async with harness() as h:
+        pub = h.publisher(Topic("test/qos", Ping, priority="real_time", congestion_control="block"))
+        assert pub._inner.priority == zenoh.Priority.REAL_TIME
+        assert pub._inner.congestion_control == zenoh.CongestionControl.BLOCK
+
+
+async def test_latched_topic_carries_qos_too():
+    """The advanced-publisher branch takes the same parameters; it must not drift."""
+    import zenoh
+
+    async with harness() as h:
+        pub = h.publisher(Topic("test/qos_latched", Ping, latched=True, priority="data_low"))
+        assert pub._inner.priority == zenoh.Priority.DATA_LOW
+
+
 async def test_service_call():
     async with harness() as h:
         await h.start_node(EchoNode)

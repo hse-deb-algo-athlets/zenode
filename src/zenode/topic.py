@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Literal, TypeVar, get_args
 
 from .codec import Codec, default_codec
 from .errors import ContractError
@@ -25,6 +25,26 @@ Rep = TypeVar("Rep")
 
 _CODEC_UNSET: Any = None
 """Sentinel default for codec fields; replaced by ``default_codec`` in __post_init__."""
+
+Priority = Literal[
+    "real_time",
+    "interactive_high",
+    "interactive_low",
+    "data_high",
+    "data",
+    "data_low",
+    "background",
+]
+"""Transmission priority band, highest to lowest. Spelled as strings so the
+contract layer stays free of zenoh types; :mod:`zenode.node` maps them."""
+
+CongestionControl = Literal["drop", "block"]
+"""What a publisher does when the transmission queue is full."""
+
+PRIORITIES: tuple[Priority, ...] = get_args(Priority)
+"""Every priority band, highest first — derived from the alias so the two cannot drift."""
+
+CONGESTION_CONTROLS: tuple[CongestionControl, ...] = get_args(CongestionControl)
 
 
 def _validate_key(key: str, *, what: str) -> None:
@@ -78,6 +98,25 @@ class Topic(Generic[T]):
             for frames and point clouds, pointless below a few tens of
             kilobytes. Requires ``[transport] shared_memory = true`` at both
             ends; falls back to a normal publish whenever that is not so.
+        priority: Transmission priority band. Zenoh drains higher bands first
+            when a link is congested, so this is how a control topic keeps
+            precedence over bulk telemetry sharing the same link. Ordering only
+            matters *relative* to the other topics on that link — moving
+            everything up moves nothing.
+        congestion_control: What to do when the transmission queue is full.
+            ``"drop"`` (zenoh's default) discards the message, which is right
+            for a stream where the next sample supersedes this one — a 30 Hz
+            camera or pose. ``"block"`` waits for the queue to drain instead,
+            for low-rate topics where a lost message is a fault rather than a
+            skipped frame. **``"block"`` blocks the caller**, and ``put()``
+            normally runs on the node's event loop, so a stalled link stalls
+            every timer, handler and signal handler in the process — the same
+            failure :meth:`Node.blocking` exists to avoid. Use it on low-rate
+            topics only, and never from a handler that must keep running.
+        express: Send each message on its own rather than batching it with
+            whatever else is queued. Trades throughput and bandwidth for a
+            little latency; worth it for small, infrequent, latency-critical
+            messages, and actively harmful on a high-rate stream.
     """
 
     key: str
@@ -89,6 +128,9 @@ class Topic(Generic[T]):
     trace: bool = False
     trace_ratio: float = 1.0
     shm: bool = False
+    priority: Priority = "data"
+    congestion_control: CongestionControl = "drop"
+    express: bool = False
     description: str = ""
     is_absolute: bool = field(default=False, repr=False)
 
@@ -105,6 +147,17 @@ class Topic(Generic[T]):
             # root, so it never starts a trace to sample in the first place.
             raise ContractError(
                 f"Topic({self.key!r}): trace_ratio has no effect without trace=True"
+            )
+        # Spelled as strings, so a typo would otherwise reach zenoh as a
+        # KeyError at declare time — inside Node.start(), long after import.
+        if self.priority not in PRIORITIES:
+            raise ContractError(
+                f"Topic({self.key!r}): priority must be one of {', '.join(PRIORITIES)}"
+            )
+        if self.congestion_control not in CONGESTION_CONTROLS:
+            raise ContractError(
+                f"Topic({self.key!r}): congestion_control must be one of "
+                f"{', '.join(CONGESTION_CONTROLS)}"
             )
         if self.codec is None:
             object.__setattr__(self, "codec", default_codec(self.schema))

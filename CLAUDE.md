@@ -43,8 +43,10 @@ uv run zenode doctor                             # config, connectivity, multica
 Four layers, each of which only depends on the ones above it.
 
 **The contract** (`topic.py`, `codec.py`, `envelope.py`, `msgs/`). A frozen `Topic` binds key +
-payload type + codec + delivery semantics (`latched`, `max_age`, `shm`, `trace`) in one
-declaration that both sides import. `TopicSet.__init_subclass__` pushes every declared
+payload type + codec + delivery semantics (`latched`, `max_age`, `shm`, `trace`, and the QoS
+trio `priority`/`congestion_control`/`express`) in one declaration that both sides import.
+QoS is spelled with `Literal` strings and mapped to zenoh enums in `node.py`, because `topic.py`
+imports no zenoh — that is what keeps the contract importable by tooling and tests. `TopicSet.__init_subclass__` pushes every declared
 `Topic`/`Service` into a **process-global registry** (`topic._REGISTRY`) — that registry is what
 makes `zenode topics` and typed `zenode echo` possible, and it is why tests that assert on
 registry *contents* use the `isolated_registry` fixture. Keys are relative; the deployment
@@ -81,6 +83,8 @@ zenoh tool. `trace.py` propagates a W3C `traceparent` through a contextvar: only
 starts a trace, everything else continues an active one, and messages outside a trace pay one
 contextvar read. `otel.py` is a strict no-op unless `zenode[otel]` is installed *and* the
 application registered a provider — zenode never builds a `TracerProvider` or reads `OTEL_*`.
+The runtime's own traffic sits below application data on purpose: health publishes at `data_low`,
+logs at `background`, so a node logging hard cannot push control messages off a congested link.
 Every counter a subscription/timer/server keeps (`received`, `dropped`, `stale`, `errors`,
 `overruns`, `deadline_misses`, `shm_fallbacks`) is summed onto the `NodeHealth` heartbeat.
 

@@ -109,7 +109,7 @@ def cmd_topics(args: argparse.Namespace) -> int:
         print("no registered topics — pass --contract <module> that defines TopicSets")
         return 1
     if topics:
-        print(f"{'KEY':<44} {'SCHEMA':<24} {'FLAGS':<26} OWNER")
+        print(f"{'KEY':<44} {'SCHEMA':<24} {'FLAGS':<42} OWNER")
         for entry, topic in topics:
             flags = []
             if topic.latched:
@@ -122,9 +122,18 @@ def cmd_topics(args: argparse.Namespace) -> int:
                 flags.append("trace" if topic.trace_ratio >= 1.0 else f"trace@{topic.trace_ratio}")
             if topic.shm:
                 flags.append("shm")
+            # Only when they differ from the default: QoS is a per-topic
+            # exception, and a listing that repeats "prio=data" on every row
+            # buries the one topic that actually claims precedence.
+            if topic.priority != "data":
+                flags.append(f"prio={topic.priority}")
+            if topic.congestion_control != "drop":
+                flags.append(topic.congestion_control)
+            if topic.express:
+                flags.append("express")
             print(
                 f"{topic.resolve(namespace):<44} {topic.schema.__name__:<24} "
-                f"{','.join(flags) or '-':<26} {entry.owner}.{entry.attr}"
+                f"{','.join(flags) or '-':<42} {entry.owner}.{entry.attr}"
             )
     if services:
         print()

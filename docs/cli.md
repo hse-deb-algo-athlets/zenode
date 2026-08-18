@@ -44,15 +44,19 @@ zenode topics --contract my_robot.contract
 ```
 
 ```
-KEY                        SCHEMA          FLAGS                OWNER
-state/odometry             OdometryState   -                    contract.Robot.odometry
-command/cmd_vel            Twist           max_age=0.5          contract.Robot.cmd_vel
-state/battery              Battery         latched(1)           contract.Robot.battery
-camera/rgb                 bytes           trace@0.01,shm       contract.Robot.camera
+KEY                        SCHEMA          FLAGS                                  OWNER
+state/odometry             OdometryState   -                                      contract.Robot.odometry
+command/cmd_vel            Twist           max_age=0.5,prio=real_time,express     contract.Robot.cmd_vel
+state/battery              Battery         latched(1),block                       contract.Robot.battery
+camera/rgb                 bytes           trace@0.01,shm,prio=data_low           contract.Robot.camera
 ```
 
 Flags show what the contract promises: `latched(n)`, `max_age=`, `trace` or
-`trace@<ratio>` for a trace root, and `shm`.
+`trace@<ratio>` for a trace root, `shm`, and the
+[QoS](contracts.md#quality-of-service) settings — `prio=<band>`, `block`,
+`express` — each shown only when it differs from the default, so the listing
+highlights the topics that claim an exception rather than repeating `prio=data`
+on every row.
 
 ## Watching data
 

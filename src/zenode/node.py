@@ -68,6 +68,24 @@ Req = TypeVar("Req")
 Rep = TypeVar("Rep")
 
 
+_PRIORITIES: dict[str, zenoh.Priority] = {
+    "real_time": zenoh.Priority.REAL_TIME,
+    "interactive_high": zenoh.Priority.INTERACTIVE_HIGH,
+    "interactive_low": zenoh.Priority.INTERACTIVE_LOW,
+    "data_high": zenoh.Priority.DATA_HIGH,
+    "data": zenoh.Priority.DATA,
+    "data_low": zenoh.Priority.DATA_LOW,
+    "background": zenoh.Priority.BACKGROUND,
+}
+"""The contract's ``Topic.priority`` strings, translated. The mapping lives here
+rather than in ``topic.py`` so the contract stays importable without zenoh."""
+
+_CONGESTION_CONTROLS: dict[str, zenoh.CongestionControl] = {
+    "drop": zenoh.CongestionControl.DROP,
+    "block": zenoh.CongestionControl.BLOCK,
+}
+
+
 def node_logger(name: str) -> logging.Logger:
     """The logger for a node: ``zenode.node.<name>``."""
     return logging.getLogger(f"zenode.node.{name}")
@@ -277,7 +295,13 @@ class Node:
             self._materialize_publishers()
             self._start_log_publishing()
             if self.health_interval is not None:
-                self._health_pub = self.publisher(Topic(health_key(self.name), NodeHealth))
+                # Below application data: a heartbeat is diagnostics, and it
+                # must not take the link from control traffic. Not `background`
+                # like the logs, though — the heartbeat is fixed-rate and tiny,
+                # and it is what tells an operator the node is alive at all.
+                self._health_pub = self.publisher(
+                    Topic(health_key(self.name), NodeHealth, priority="data_low")
+                )
                 self.every(self.health_interval, self._publish_health, name="health")
             self._entered_on_start = True
             await self._run_on_start()
@@ -393,7 +417,11 @@ class Node:
         """
         if self.publish_logs_at is None or self._loop is None:
             return
-        publisher = self.publisher(Topic(log_key(self.name), LogRecordMsg))
+        # The lowest band, because log volume spikes exactly when something is
+        # going wrong — which is also when the control traffic sharing the link
+        # can least afford to queue behind a burst of records. Records lost that
+        # way are still on stderr, where a local journal keeps them.
+        publisher = self.publisher(Topic(log_key(self.name), LogRecordMsg, priority="background"))
         handler = LogPublisher(publisher, self.name, self._loop)
         handler.setLevel(self.publish_logs_at.upper())
         self.log.addHandler(handler)
@@ -596,16 +624,24 @@ class Node:
 
     def publisher(self, topic: Topic[T]) -> Publisher[T]:
         key = topic.resolve(self.namespace)
+        # QoS is fixed at declaration, not per-put, and both publisher flavours
+        # take the same three parameters — so the branches must not drift.
+        qos: dict[str, Any] = {
+            "encoding": topic.codec.encoding,
+            "priority": _PRIORITIES[topic.priority],
+            "congestion_control": _CONGESTION_CONTROLS[topic.congestion_control],
+            "express": topic.express,
+        }
         if topic.latched:
             inner: Any = zext.declare_advanced_publisher(
                 self.session,
                 key,
-                encoding=topic.codec.encoding,
                 cache=zext.CacheConfig(topic.history),
                 publisher_detection=True,
+                **qos,
             )
         else:
-            inner = self.session.declare_publisher(key, encoding=topic.codec.encoding)
+            inner = self.session.declare_publisher(key, **qos)
         if topic.shm and not self._transport.shared_memory:
             # Publishing still works, just with the copy shm=True was meant to
             # avoid — and silently, which is the part worth warning about.
