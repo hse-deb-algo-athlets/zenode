@@ -15,7 +15,7 @@ docker); they find each other over zenoh.
 ## Documentation
 
 Rendered docs, including the full API reference:
-**[fabian-bxr.github.io/zenode](https://fabian-bxr.github.io/zenode/)**
+**[hse-deb-algo-athlets.github.io/zenode](https://hse-deb-algo-athlets.github.io/zenode/)**
 
 | | |
 |---|---|

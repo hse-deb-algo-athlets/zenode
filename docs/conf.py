@@ -49,7 +49,7 @@ exclude_patterns = ["_build"]
 html_theme = "furo"
 html_title = f"zenode {release}"
 html_theme_options = {
-    "source_repository": "https://github.com/fabian-bxr/zenode",
+    "source_repository": "https://github.com/hse-deb-algo-athlets/zenode",
     "source_branch": "main",
     "source_directory": "docs/",
 }

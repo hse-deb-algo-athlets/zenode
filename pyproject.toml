@@ -35,10 +35,10 @@ otel = ["opentelemetry-api>=1.20"]
 # compiled dependencies) stay the application's choice. See zenode/otel.py.
 
 [project.urls]
-Homepage = "https://github.com/fabian-bxr/zenode"
-Repository = "https://github.com/fabian-bxr/zenode"
-Documentation = "https://fabian-bxr.github.io/zenode/"
-Issues = "https://github.com/fabian-bxr/zenode/issues"
+Homepage = "https://github.com/hse-deb-algo-athlets/zenode"
+Repository = "https://github.com/hse-deb-algo-athlets/zenode"
+Documentation = "https://hse-deb-algo-athlets.github.io/zenode/"
+Issues = "https://github.com/hse-deb-algo-athlets/zenode/issues"
 
 [project.scripts]
 zenode = "zenode.cli:main"
