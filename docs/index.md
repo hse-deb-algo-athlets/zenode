@@ -113,7 +113,7 @@ They discover each other over multicast; no configuration is needed on a LAN.
 
 ## Runnable examples
 
-[`examples/`](https://github.com/fabian-bxr/zenode/tree/main/examples) in the
+[`examples/`](https://github.com/hse-deb-algo-athlets/zenode/tree/main/examples) in the
 repository contains complete programs, each runnable as-is:
 
 | Example | Shows |
