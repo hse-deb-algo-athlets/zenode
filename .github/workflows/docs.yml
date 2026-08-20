@@ -20,8 +20,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --group docs
       - run: uv run sphinx-build -W -b html docs docs/_build/html
