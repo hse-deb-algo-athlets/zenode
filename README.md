@@ -14,6 +14,9 @@ docker); they find each other over zenoh.
 
 ## Documentation
 
+Rendered docs, including the full API reference:
+**[fabian-bxr.github.io/zenode](https://fabian-bxr.github.io/zenode/)**
+
 | | |
 |---|---|
 | [Getting started](docs/index.md) | Install, a first node, where to go next |

@@ -54,9 +54,7 @@ camera/rgb                 bytes           trace@0.01,shm,prio=data_low         
 Flags show what the contract promises: `latched(n)`, `max_age=`, `trace` or
 `trace@<ratio>` for a trace root, `shm`, and the
 [QoS](contracts.md#quality-of-service) settings — `prio=<band>`, `block`,
-`express` — each shown only when it differs from the default, so the listing
-highlights the topics that claim an exception rather than repeating `prio=data`
-on every row.
+`express` — each shown only when it differs from the default.
 
 ## Watching data
 
@@ -75,8 +73,8 @@ zenode echo state/odometry --contract my_robot.contract --meta
 | `--pretty` | Pretty-print JSON. |
 | `--absolute` | Do not prefix the namespace. |
 
-`--meta` is how you tell *nothing is being published* from *it is arriving and
-being dropped*: it shows the sender and the age of every sample.
+`--meta` distinguishes *nothing is published* from *arriving but dropped*: it
+shows the sender and the age of every sample.
 
 ### `hz`
 
@@ -86,8 +84,8 @@ Measures the publish rate on a key over a rolling window.
 zenode hz camera/rgb --window 5
 ```
 
-Use it to confirm a producer actually holds its rate, rather than inferring it
-from a timer's configuration.
+Confirms a producer actually holds its rate, rather than inferring it from a
+timer's configuration.
 
 ## Watching nodes
 
@@ -99,8 +97,8 @@ Lists nodes holding a liveliness token.
 zenode nodes --watch
 ```
 
-`--watch` prints join and leave events as they happen, which is the quickest
-way to catch a node that is restarting in a loop.
+`--watch` prints join and leave events as they happen — useful for catching a
+node that restarts in a loop.
 
 ### `health`
 
@@ -131,8 +129,7 @@ Exits non-zero when nothing answered, so it composes into a health check.
 
 ### `logs`
 
-Follows log records from every node, off the bus rather than out of eleven
-terminals.
+Follows log records from every node, off the bus.
 
 ```bash
 zenode logs --level WARNING
@@ -149,8 +146,6 @@ zenode logs --trace 45d06757a549f538cf9ada58309e0bef
 
 Nodes publish at `publish_logs_at` (default `WARNING`) and above, so that is
 the floor regardless of `--level`.
-
-`--trace` is the 2am command: one trace id, every hop of it, across the fleet.
 
 ### `trace`
 
@@ -213,6 +208,5 @@ zenode 0.1.0 doctor
   ✓ contract: 12 topics, 3 services
 ```
 
-Run it first whenever nodes cannot see each other. The multicast check is the
-one that usually explains it: a firewall dropping UDP 7446 is the most common
-cause, and the check says so rather than leaving you to guess.
+Run it first when nodes cannot see each other. The multicast check usually
+explains it; a firewall dropping UDP 7446 is the most common cause.

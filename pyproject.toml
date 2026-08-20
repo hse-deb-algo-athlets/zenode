@@ -37,7 +37,7 @@ otel = ["opentelemetry-api>=1.20"]
 [project.urls]
 Homepage = "https://github.com/fabian-bxr/zenode"
 Repository = "https://github.com/fabian-bxr/zenode"
-Documentation = "https://github.com/fabian-bxr/zenode/blob/main/docs/index.md"
+Documentation = "https://fabian-bxr.github.io/zenode/"
 Issues = "https://github.com/fabian-bxr/zenode/issues"
 
 [project.scripts]
@@ -48,7 +48,7 @@ requires = ["uv_build>=0.8.4,<0.9.0"]
 build-backend = "uv_build"
 
 [tool.uv]
-default-groups = ["dev"]
+default-groups = ["dev", "docs"]
 
 [dependency-groups]
 dev = [
@@ -60,6 +60,15 @@ dev = [
     "ty>=0.0.63",
     "pre-commit>=4.6.1",
     "opentelemetry-sdk>=1.20",  # tests/test_otel.py records spans in memory
+]
+docs = [
+    # Built in CI and on demand (uv run --group docs …); never shipped, so the
+    # runtime-dependency constraint is untouched.
+    "sphinx>=8.2",
+    "furo>=2024.8.6",
+    "myst-parser>=4.0",
+    "sphinx-copybutton>=0.5.2",
+    "sphinxcontrib-mermaid>=1.0",  # renders the frame-chain diagram in conventions.md
 ]
 
 [tool.pytest.ini_options]

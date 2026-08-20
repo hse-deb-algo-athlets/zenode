@@ -91,9 +91,8 @@ CAMERA = Topic("camera/rgb", bytes, codec=RawCodec(Encoding.IMAGE_JPEG),
                priority="data_low", shm=True)
 ```
 
-Only the *relative* order matters. Raising every topic to `real_time` restores
-exactly the situation you started from, so spend the bands on the handful of
-topics that genuinely outrank the rest.
+Only the *relative* order matters: raising every topic to `real_time` changes
+nothing. Reserve the higher bands for the topics that must outrank the rest.
 
 zenode's own runtime traffic is already placed below application data: the
 health heartbeat publishes at `data_low` and the log stream at `background`, so
@@ -116,8 +115,7 @@ whatever else is queued, trading throughput for a little latency. It is worth
 it for small, infrequent, latency-critical messages, and counterproductive on a
 high-rate stream, where batching is what keeps the per-message overhead down.
 
-`zenode topics` shows all three as flags, but only when they differ from the
-default — so the listing highlights the topics that claim an exception.
+`zenode topics` shows all three as flags when they differ from the default.
 
 ## Service
 

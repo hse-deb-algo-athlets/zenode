@@ -204,8 +204,8 @@ Two details are load-bearing:
   `Defragment` is what keeps a 30 Hz camera allocating indefinitely.
 - **The provider must be created before the session** when `RLIMIT_MEMLOCK` is
   tight, because both draw on the same budget. zenode creates the pool lazily,
-  which is correct when the limit is raised as documented and the reason the
-  limit is documented as a prerequisite rather than a suggestion.
+  which is why raising the limit is documented as a prerequisite rather than a
+  suggestion.
 
 ## Failure handling
 

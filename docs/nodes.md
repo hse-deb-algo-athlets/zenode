@@ -49,18 +49,15 @@ zenode's own that a subclass may redefine.
 
 ## The shared namespace
 
-A node subclasses `Node`, so the two share one namespace and every name the
-runtime holds is a name your node cannot have. Two mechanisms keep that from
-being a trap.
+A node subclasses `Node`, so every name the runtime holds is unavailable to
+your node. Two mechanisms prevent collisions.
 
 **Runtime state is name-mangled.** Everything `__init__` sets lives at
 `_Node__loop`, `_Node__session`, `_Node__tasks` and so on, so `_state`,
 `_process`, `_tasks`, `_timers` and the rest of the obvious private names are
-yours to use. This matters more than it sounds: Python resolves an instance
-attribute *before* a class method, so an unmangled `self._process` assigned
-during construction would not override your `_process` method — it would make it
-unreachable, silently, with the failure surfacing later as a `TypeError` at the
-first call.
+yours to use. Python resolves an instance attribute *before* a class method, so
+an unmangled `self._process` assigned during construction would silently shadow
+your `_process` method, surfacing later as a `TypeError`.
 
 **Collisions with the public API are refused at import.** Defining a method or
 attribute that lands on one of `Node`'s own raises `ContractError` when the class
@@ -74,13 +71,12 @@ class Detector(Node):
         return "busy"              # zenode owns: state.
 ```
 
-`log` and `namespace` are covered too. Both are set on the instance rather than
-the class, so `dir(Node)` does not list them and no IDE will warn you — which is
-exactly why the guard carries them explicitly.
+`log` and `namespace` are also guarded. Both are set on the instance rather
+than the class, so `dir(Node)` does not list them and no IDE warns about them.
 
 Overriding a *private* method (`_teardown`, `_wire_bindings`) is refused on the
-same grounds. If you want a name the guard reserves, rename yours; nothing in
-the runtime is designed to be replaced except the attributes in the table above.
+same grounds. Nothing in the runtime is designed to be replaced except the
+attributes in the table above.
 
 ## Wiring
 
@@ -203,24 +199,20 @@ behave differently:
 | Dropped by `max_age` | **No** | It never reaches a handler. |
 | Malformed payload | Yes | Decoding happens after arrival is stamped. |
 
-The `max_age` case is the one worth understanding. A producer whose clock is
-skewed sends a perfectly healthy stream that `max_age` discards in full. If
-that satisfied the deadline, the consumer would believe data was flowing while
-its handler had not run in minutes — the exact failure the deadline exists to
-catch.
+The `max_age` case matters: a producer with a skewed clock sends a healthy
+stream that `max_age` discards in full. If that satisfied the deadline, the
+consumer would believe data was flowing while its handler never ran.
 
-The malformed case is an accepted hole rather than a design goal: decoding
-happens after arrival is stamped, so a producer emitting garbage keeps the
-deadline satisfied and surfaces as `errors` instead. That is tolerable because
-a schema mismatch is loud on the very first message at deploy time, unlike
-clock drift, which develops on a moving robot.
+The malformed case is an accepted gap: decoding happens after arrival is
+stamped, so a producer emitting garbage keeps the deadline satisfied and
+surfaces as `errors` instead. A schema mismatch is loud on the first message at
+deploy time; clock drift is not.
 
 ### Reacting to transitions
 
 Silence detection is **edge-triggered**: one callback per transition, not one
-per second, because a latching reaction re-fired continuously is noise. The
-deadline is armed when the subscription starts, so a producer that never starts
-is caught as well as one that dies.
+per second. The deadline is armed when the subscription starts, so a producer
+that never starts is caught as well as one that dies.
 
 ```python
 @on_silence(CMD)
@@ -245,9 +237,8 @@ if self.cmd_sub.silent:
 ```
 
 `silent` is `True` while the deadline is elapsed; `silent_for` gives the
-seconds since data stopped, and `0.0` while receiving. Prefer `@on_silence` —
-it fires once, at the moment it matters, instead of requiring somewhere to poll
-from.
+seconds since data stopped, and `0.0` while receiving. Prefer `@on_silence`; it
+fires once, at the transition.
 
 ## Timers
 
@@ -284,42 +275,37 @@ async def on_stop(self) -> None:
         self.motors.disable()
 ```
 
-That guarantee is why a node that dies while arming its third motor still safes
-the first two.
-
 `run()` installs SIGINT and SIGTERM handlers, so `Ctrl-C` and `systemctl stop`
 both take the graceful path.
 
 ### Do not block in `on_start`
 
-`on_start` runs on the event loop under `start_timeout` (30 s by default).
-Overrun it and the node tears down and raises `StartTimeout`, which `run()`
-turns into exit 1 — so a supervisor restarts a node wedged on hardware instead
-of leaving it in `starting` forever.
+`on_start` runs on the event loop under `start_timeout` (30 s by default). On
+overrun the node tears down and raises `StartTimeout`, which `run()` turns into
+exit 1, so a supervisor can restart a node wedged on hardware.
 
-That deadline is a loop timer, so it only fires while the loop can still run. A
-*synchronous* call in `on_start` blocks the timer along with everything else,
-including the signal handlers: a node parked inside `pipeline.start()` cannot be
-timed out, and does not answer `Ctrl-C` either. Push it to a thread:
+The deadline is a loop timer and only fires while the loop runs. A
+*synchronous* call in `on_start` blocks it along with the signal handlers: the
+node can neither be timed out nor answer `Ctrl-C`. Push blocking calls to a
+thread:
 
 ```python
 async def on_start(self) -> None:
     self.pipeline = await self.blocking(open_camera, self.config.device)   # not open_camera(...)
 ```
 
-Set `start_timeout = None` to wait indefinitely — reasonable for a node whose
-startup is genuinely long and not hardware-bound, less so for a driver.
+Set `start_timeout = None` to wait indefinitely.
 
-The health heartbeat is already ticking while `on_start` runs, deliberately:
-`zenode health` reporting `state="starting"` for twenty seconds is how a slow
-start becomes visible. It is the one thing live before `on_start` returns.
+The health heartbeat already ticks while `on_start` runs, so `zenode health`
+reports `state="starting"` during a slow start. It is the only thing live
+before `on_start` returns.
 
 ### Nodes are single-use
 
-A node that has run and been stopped will not start again — `stop()` is latched,
-so a second `start()` would come up and exit again without a word. It raises
-instead; construct a new instance. A start that *failed* may be retried, since
-it left nothing declared.
+A node that has run and been stopped will not start again: `stop()` is latched,
+and a second `start()` raises instead of coming up and exiting silently.
+Construct a new instance. A start that *failed* may be retried, since it left
+nothing declared.
 
 ### Teardown is bounded
 
@@ -340,10 +326,10 @@ async def on_start(self) -> None:
     await self.wait_for_nodes({"localization", "lidar"})
 ```
 
-Starting a second node with a live name logs a warning by default, because
+Starting a second node with a live name logs a warning by default, since
 restarts and handovers legitimately overlap for a moment. Set
-`allow_duplicates = False` to make it an error instead — worth doing during
-development, where a stray instance silently doubles every message.
+`allow_duplicates = False` to make it an error — useful during development,
+where a stray instance silently doubles every message.
 
 ## Publisher
 
@@ -383,13 +369,12 @@ class CameraNode(Node):
 ```
 
 The hook fires **once with the current state** when the node starts, then only
-on a change — so it alone decides, with nothing left to poll. zenoh reports
-changes, not levels: a publisher declared with nobody listening would otherwise
-never hear anything and the node would have to guess where it started.
+on a change. zenoh reports changes, not levels; the initial callback is what
+saves the node from guessing its starting state.
 
-Rising and falling edges are first-and-last, not per subscriber: a second
-viewer joining is not another rising edge, so a hook that starts hardware is
-never told to start it twice.
+Edges are first-and-last, not per subscriber: a second viewer joining is not
+another rising edge, so a hook that starts hardware is never told to start it
+twice.
 
 Same shape imperatively, for a publisher created in `on_start`:
 
@@ -399,13 +384,12 @@ self.publisher(Topics.frames).on_matching(self._on_viewers)
 
 Two constraints, both errors at `start()` rather than silent no-ops: the node
 must publish the topic, and the topic must not be latched — a latched publisher
-always matches, so the falling edge would never arrive and the camera would run
-forever while the gate looked wired up. A hook that raises is logged and counted
-into `handler_errors` on the heartbeat; the node keeps running.
+always matches, so the falling edge would never arrive. A hook that raises is
+logged and counted as `handler_errors`; the node keeps running.
 
-Matching is a view of the routing graph, not a delivery receipt. It is the right
-signal for "don't bother producing this" and the wrong one for "the data
-definitely arrived" — and it says nothing about *who* is listening.
+Matching is a view of the routing graph, not a delivery receipt: the right
+signal for "don't bother producing this", the wrong one for "the data arrived".
+It says nothing about *who* is listening.
 
 ## Entry point
 

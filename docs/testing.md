@@ -109,7 +109,7 @@ assert await wait_for(lambda: node.stopped)
 ```
 
 Asserting on a second subscriber's state immediately after `next()` is the most
-common source of a test that passes alone and fails in a full run.
+common source of flaky tests.
 
 ## Namespaces
 

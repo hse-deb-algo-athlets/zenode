@@ -16,6 +16,7 @@ uv run ruff check .                              # lint
 uv run ruff format src tests examples            # format — see note below
 uv run pyright                                   # type check (src + tests)
 uv run ty check src tests                        # second type checker
+uv run sphinx-build -W -b html docs docs/_build/html   # docs site, same flags as CI
 ```
 
 `asyncio_mode = "auto"`, so async tests need no decorator. `--strict-markers` is on: a harness

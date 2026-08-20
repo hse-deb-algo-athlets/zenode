@@ -1,5 +1,19 @@
 # zenode documentation
 
+```{toctree}
+:hidden:
+
+contracts
+nodes
+configuration
+testing
+cli
+conventions
+open-telemetry
+shared-memory
+api/index
+```
+
 zenode is a typed node framework for distributed robot systems on
 [Eclipse Zenoh](https://zenoh.io). Independent processes ("nodes") are coupled
 only through a **typed topic contract**; the runtime handles session bootstrap,
@@ -20,6 +34,7 @@ however you like and find each other over the network.
 | [Conventions](conventions.md) | Units, frames, time, key naming |
 | [Observability](open-telemetry.md) | Logging, tracing, metrics, exporting |
 | [Shared memory](shared-memory.md) | Publishing large payloads |
+| [API reference](api/index.rst) | Generated from the package docstrings |
 
 ## Installation
 
@@ -95,6 +110,17 @@ python monitor.py    # in another
 ```
 
 They discover each other over multicast; no configuration is needed on a LAN.
+
+## Runnable examples
+
+[`examples/`](https://github.com/fabian-bxr/zenode/tree/main/examples) in the
+repository contains complete programs, each runnable as-is:
+
+| Example | Shows |
+|---|---|
+| `contract.py`, `talker.py`, `listener.py` | Typed pub/sub and a service call between two processes; the recommended starting point for a new contract |
+| `otel_pipeline.py` | A traced three-node pipeline exporting spans to an OpenTelemetry backend |
+| `shm_camera.py` | Shared-memory publishing, with `--plain` to compare against the normal path |
 
 ## What the runtime guarantees
 
