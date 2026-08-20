@@ -10,7 +10,7 @@ from importlib.metadata import version as _version
 
 project = "zenode"
 author = "Fabian Bahr"
-copyright = "2026, Fabian Bahr"
+copyright = "2026, Hochschule Esslingen"
 release = _version("zenode")
 version = release
 
